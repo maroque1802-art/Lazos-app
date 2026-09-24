@@ -682,6 +682,14 @@ function mensajeDeErrorSb(e){
    LOGICA DE NEGOCIO
    ========================================================= */
 function prestamoById(id){ return SEED.prestamos.find(p => p.id === id); }
+
+/* Los ids de movimientos y solicitudes son bigint en Postgres, así que en
+   JavaScript llegan como número. Pero cualquier id que venga del HTML
+   (data-mov, data-sol) llega como texto: 1 === "1" es falso y la búsqueda
+   devolvía undefined sin avisar. Se comparan siempre como texto. */
+function mismoId(a, b){ return String(a) === String(b); }
+function movPorId(id){ return MOVS.find(m => mismoId(m.id, id)); }
+function solicitudPorId(id){ return SOLICITUDES.find(x => mismoId(x.id, id)); }
 function movimientos(prestamoId){ return MOVS.filter(m => m.prestamoId === prestamoId); }
 function esAprobado(m){ return m.estado === 'aprobado' || m.estado === 'aprobado_caja'; }
 function movimientosAprobados(prestamoId){ return movimientos(prestamoId).filter(esAprobado); }
@@ -854,7 +862,7 @@ async function crearSolicitud({socio, cliente, monto, plazo, metodoDesembolso, n
   return true;
 }
 async function aprobarSolicitud(id, {monto, plazo, intereses, metodo, fechaDesembolso, comprobanteImg}){
-  const sol = SOLICITUDES.find(s=>s.id===id);
+  const sol = solicitudPorId(id);
   if(!sol) return null;
   const nuevoId = nextPrestamoId();
   const vencimiento = formatDMY(addMonthsSameDay(parseDMY(fechaDesembolso), plazo));
@@ -1119,9 +1127,9 @@ function nombreClientePorPrestamo(prestamoId){
 }
 
 function abrirPdfReversa(movId){
-  const rev = MOVS.find(x=>String(x.id)===String(movId) && x.tipo==='reversa');
+  const rev = MOVS.find(x=>mismoId(x.id, movId) && x.tipo==='reversa');
   if(!rev) return;
-  const original = MOVS.find(x=>String(x.id)===String(rev.reversaDeId));
+  const original = movPorId(rev.reversaDeId);
   const recibo = original && original.reciboNumero
     ? RECIBOS.find(x=>x.numero===original.reciboNumero) : null;
   return entregarPdf(
@@ -1376,7 +1384,7 @@ async function registrarAbono({prestamoId, fecha, monto, metodo, nota, rebaja, p
 }
 
 async function aprobarAbono(movId, {montoFinal, rebajaFinal, motivo} = {}){
-  const m = MOVS.find(x=>String(x.id)===String(movId));
+  const m = movPorId(movId);
   if(!m) return;
 
   const cambios = { estado:'aprobado', aprobado_por:'Administrador', aprobado_en: dmyAIso(SEED.fechaCorte) };
@@ -1389,13 +1397,13 @@ async function aprobarAbono(movId, {montoFinal, rebajaFinal, motivo} = {}){
 
   // El recibo se emite con los saldos ya actualizados, por eso se recarga antes.
   await cargarTodo();
-  const recibo = await generarRecibo(MOVS.find(x=>String(x.id)===String(movId)));
+  const recibo = await generarRecibo(movPorId(movId));
   await cargarTodo();
   if(recibo){ STATE.modal = {type:'recibo', recibo}; toast('Abono aprobado. Recibo ' + recibo.numero + ' generado.'); }
   render();
 }
 async function rechazarAbono(movId, motivo){
-  const m = MOVS.find(x=>String(x.id)===String(movId));
+  const m = movPorId(movId);
   if(!m) return;
   await conGuardado(async () => {
     const { error } = await sb.from('movimientos')
@@ -1404,7 +1412,7 @@ async function rechazarAbono(movId, motivo){
   }, 'Abono rechazado. Vuelve al socio.');
 }
 async function confirmarCaja(movId, montoFinal, motivo){
-  const m = MOVS.find(x=>String(x.id)===String(movId));
+  const m = movPorId(movId);
   if(!m) return null;
 
   const cambios = { estado:'aprobado_caja', aprobado_por:'Administrador (cierre de caja)',
@@ -1466,7 +1474,7 @@ async function registrarCierreCaja({recibos, otrosMovs, esperado, contado, desgl
   if(eNum){ toast(mensajeDeErrorSb(eNum)); return null; }
 
   const detalle = recibos.map(r=>{
-    const mov = MOVS.find(m=>String(m.id)===String(r.movId));
+    const mov = movPorId(r.movId);
     return mov ? detalleDesdeMov(mov, r.numero)
                : {recibo:r.numero, cliente:r.cliente, prestamoId:r.prestamoId, socio:'', metodo:r.metodo, monto:r.monto, fecha:r.fecha, registradoPor:''};
   });
@@ -1514,7 +1522,7 @@ async function registrarCierreCaja({recibos, otrosMovs, esperado, contado, desgl
   };
 }
 async function reversarAbono(movId, motivo){
-  const original = MOVS.find(x=>String(x.id)===String(movId));
+  const original = movPorId(movId);
   if(!original) return;
   let numeroNota = '';
   await conGuardado(async () => {
@@ -1775,7 +1783,7 @@ function renderDetalle(id, esAdmin){
 
 function renderMovItem(m, esAdmin){
   const reversado = !!m.reversadoPorId;
-  const espejo = reversado ? MOVS.find(x=>String(x.id)===String(m.reversadoPorId)) : null;
+  const espejo = reversado ? movPorId(m.reversadoPorId) : null;
   const notaReversa = espejo ? espejo.reversaNumero : null;
   const puedeReversar = esAdmin && esAprobado(m) && !reversado && m.tipo==='abono';
   return `<div class="mov-item ${m.tipo==='reversa'?'reversa':m.estado}">
@@ -2628,7 +2636,7 @@ document.addEventListener('click', async function(e){
     const pendientes = [];
     let faltaMotivo = false;
     checks.forEach(c=>{
-      const mov = MOVS.find(m=>m.id===c.dataset.mov);
+      const mov = movPorId(c.dataset.mov);
       if(!mov || !c.checked) return;
       const montoInput = document.querySelector(`.caja-monto-input[data-mov="${mov.id}"]`);
       const montoFinal = montoInput ? parseMoneyInputValue(montoInput.value) : mov.monto;
@@ -2662,7 +2670,7 @@ document.addEventListener('click', async function(e){
     await cargarTodo();
     const recibos = [];
     for(const id of movIds){
-      const r = await generarRecibo(MOVS.find(m=>String(m.id)===String(id)));
+      const r = await generarRecibo(movPorId(id));
       if(r) recibos.push(r);
       await cargarTodo();
     }
