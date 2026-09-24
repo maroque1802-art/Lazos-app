@@ -307,9 +307,13 @@ tr:hover td{background:var(--bg-alt);}
 .desglose-tabla input{width:72px; padding:5px 6px; text-align:right; font-size:13px; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--text);}
 .recibo{border:2px dashed var(--c-primary); border-radius:14px; padding:18px; background:var(--bg-alt);}
 .recibo .r-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;}
-.recibo table{min-width:0;}
-.recibo td{border:none; padding:5px 0; font-size:14px;}
-.recibo td.k{color:var(--text-muted); width:55%;}
+/* Las tablas de datos llevan min-width y scroll horizontal; el recibo no,
+   porque va dentro de un modal angosto. Con table-layout fijo las dos
+   columnas respetan su ancho y el texto largo parte de línea en vez de
+   empujar la tabla fuera de la tarjeta. */
+.recibo table{min-width:0; width:100%; table-layout:fixed;}
+.recibo td{border:none; padding:5px 0; font-size:14px; overflow-wrap:anywhere;}
+.recibo td.k{color:var(--text-muted); width:55%; padding-right:8px;}
 .recibo td.v{font-weight:800; text-align:right;}
 .recibo .legal{font-size:11px; color:var(--text-muted); margin-top:12px; text-align:center;}
 /* toast */
@@ -440,7 +444,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '1.3';
+const APP_VERSION = '1.4';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -867,6 +871,15 @@ function calcEstado(p){
 }
 function diasEspera(m){
   return Math.max(0, daysBetween(parseDMY(m.fecha), todayCutoff()));
+}
+
+/* ¿Este abono cancela el préstamo antes del vencimiento?
+   Solo entonces se perdonan intereses: un abono parcial dentro del plazo no
+   da rebaja. Se compara contra el saldo menos la propia rebaja, que es lo
+   que el cliente tendría que traer ese día para saldar.
+   El peso de 1 colón es para no pelear con el redondeo. */
+function cancelaAnticipado(p, monto, rebaja, suger){
+  return suger.aplica && monto >= (saldoConfirmado(p) - rebaja - 1);
 }
 
 function calcCancelacionAnticipada(p, fechaPagoStr){
@@ -1566,7 +1579,7 @@ async function rechazarAbono(movId, motivo){
     if(error) throw error;
   }, 'Abono rechazado. Vuelve al socio.');
 }
-async function confirmarCaja(movId, montoFinal, motivo){
+async function confirmarCaja(movId, montoFinal, motivo, rebajaFinal){
   const m = movPorId(movId);
   if(!m) return null;
 
@@ -1576,10 +1589,41 @@ async function confirmarCaja(movId, montoFinal, motivo){
     cambios.monto = Math.round(montoFinal);
     if(motivo) cambios.motivo_ajuste = motivo;
   }
+  // Siempre se escribe, incluso cuando queda en cero: la rebaja que traía el
+  // movimiento desde que se registró puede haber dejado de corresponder.
+  if(rebajaFinal !== undefined) cambios.rebaja_aplicada = Math.round(rebajaFinal);
   const { error } = await sb.from('movimientos').update(cambios).eq('id', m.id);
   if(error){ toast(mensajeDeErrorSb(error)); return null; }
   return m.id;
 }
+/* La rebaja se calculó contra un monto que el administrador puede cambiar al
+   contar la plata. Si baja y ya no alcanza para saldar el préstamo, no hay
+   cancelación anticipada y por lo tanto no hay rebaja: se cae sola y se dice
+   por qué. Sin esto, el cliente se quedaba con el descuento sin haber pagado
+   lo que costaba cancelar. */
+function revisarRebajaCaja(movId){
+  const inpMonto = document.querySelector(`.caja-monto-input[data-mov="${movId}"]`);
+  const wrap     = document.querySelector(`.caja-rebaja-wrap[data-mov="${movId}"]`);
+  const inpReb   = document.querySelector(`.caja-rebaja-input[data-mov="${movId}"]`);
+  const aviso    = document.querySelector(`.caja-rebaja-aviso[data-mov="${movId}"]`);
+  if(!inpMonto || !wrap || !inpReb) return;
+
+  const suger  = Number(inpMonto.dataset.suger) || 0;
+  const saldo  = Number(inpMonto.dataset.saldo) || 0;
+  const monto  = parseMoneyInputValue(inpMonto.value);
+  const alcanza = monto >= (saldo - suger - 1);
+
+  if(alcanza){
+    wrap.style.display = '';
+    if(parseMoneyInputValue(inpReb.value) === 0) inpReb.value = moneyInputValue(suger);
+    if(aviso) aviso.innerHTML = '';
+  }else{
+    wrap.style.display = 'none';
+    inpReb.value = moneyInputValue(0);
+    if(aviso) aviso.innerHTML = `<div class="notice warn">Con ${formatMoney(monto)} no alcanza para cancelar el préstamo: hacen falta ${formatMoney(saldo - suger)}. La rebaja por pronto pago no se aplica y el préstamo queda con saldo.</div>`;
+  }
+}
+
 /* Suma lo marcado como recibido y refresca esperado y diferencia del cierre del día. */
 function actualizarTotalesCaja(){
   let esperado = 0;
@@ -2411,15 +2455,28 @@ function renderCierreCaja(){
       ${efectivos.length ? `<h3 style="margin-top:16px;">Abonos en efectivo por confirmar</h3>` : ''}
       ${efectivos.map(m=>{
         const p = prestamoById(m.prestamoId);
+        const suger = calcCancelacionAnticipada(p, m.fecha);
+        const cancela = cancelaAnticipado(p, m.monto, suger.rebajaSugerida, suger);
+        const rebajaPrefill = cancela ? Math.round(m.rebajaAplicada || suger.rebajaSugerida) : 0;
         return `<div class="mov-item pendiente">
           <div class="mov-top"><span>${p.cliente} · N° ${p.id}</span><span>${formatMoney(m.monto)}</span></div>
           <div class="mov-meta">Socio: ${p.socio} · Fecha de pago: ${m.fecha} · Registrado por: ${m.registradoPor}</div>
           ${m.comprobanteImg?`<img src="${m.comprobanteImg}" class="comprobante-thumb-sm" data-action="ver-imagen" data-src="${m.comprobanteImg}" alt="Comprobante">`:''}
+          ${cancela ? `<div class="notice">Este abono cancela el préstamo antes del vencimiento: rebaja sugerida ${formatMoney(suger.rebajaSugerida)}. Saldo actual ${formatMoney(saldoConfirmado(p))}.</div>` : ''}
           <div class="field" style="margin-top:8px;">
             <label>Monto a confirmar</label>
-            <input type="text" inputmode="numeric" class="caja-monto-input money-input" data-mov="${m.id}" value="${moneyInputValue(m.monto)}">
+            <input type="text" inputmode="numeric" class="caja-monto-input money-input"
+                   data-mov="${m.id}" data-prestamo="${p.id}" data-suger="${Math.round(suger.rebajaSugerida)}"
+                   data-aplica="${suger.aplica?1:0}" data-saldo="${saldoConfirmado(p)}"
+                   value="${moneyInputValue(m.monto)}">
             <span class="hint">El socio reportó ${formatMoney(m.montoReportado)}.</span>
           </div>
+          ${suger.aplica ? `<div class="field caja-rebaja-wrap" data-mov="${m.id}" style="${cancela?'':'display:none;'}">
+            <label>Rebaja por pronto pago</label>
+            <input type="text" inputmode="numeric" class="caja-rebaja-input money-input" data-mov="${m.id}" value="${moneyInputValue(rebajaPrefill)}">
+            <span class="hint">Solo para descontar intereses por cancelar antes del vencimiento. Si bajás el monto y ya no alcanza para saldar, la rebaja se cae sola.</span>
+          </div>
+          <div class="caja-rebaja-aviso" data-mov="${m.id}"></div>` : ''}
           <div class="caja-monto-motivo-wrap" data-mov="${m.id}"></div>
           <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-weight:700; font-size:13.5px;">
             <input type="checkbox" class="caja-check" data-mov="${m.id}" data-monto-original="${m.monto}" style="width:18px;height:18px;"> Recibido en caja
@@ -2574,7 +2631,7 @@ function renderTablaCierres(){
     const dif = ci.contado - ci.esperado;
     return `<tr>
       <td>${ci.numero}</td><td>${ci.fecha}</td>
-      <td>${ci.detalle.length + ci.otros.length}</td>
+      <td>${(ci.detalle.length + ci.otros.length) || recibosDelCierre(ci.numero).length}</td>
       <td>${formatMoney(ci.esperado)}</td><td>${formatMoney(ci.contado)}</td>
       <td style="color:${dif===0?'var(--success)':'var(--danger)'}">${formatMoney(dif)}</td>
       <td>${formatMoney(ci.totalOtros)}</td>
@@ -2582,10 +2639,13 @@ function renderTablaCierres(){
       <td>${formatMoney(ci.saldoEfectivo)}</td>
       <td>${formatMoney(ci.saldoBancos)}</td>
       <td>${ci.observaciones||''}</td>
-      <td><button class="btn btn-ghost btn-sm no-print" data-action="pdf-cierre" data-numero="${ci.numero}" data-reimpresion="1">Reimprimir</button></td>
+      <td style="white-space:nowrap;">
+        <button class="btn btn-ghost btn-sm no-print" data-action="pdf-cierre" data-numero="${ci.numero}" data-reimpresion="1">Reimprimir</button>
+        <button class="btn btn-ghost btn-sm no-print" data-action="ver-recibos-cierre" data-numero="${ci.numero}">Recibos</button>
+      </td>
     </tr>`;
   }).join('');
-  return `<p class="muted">Del más reciente al más antiguo. Un cierre por día, con todo el movimiento.</p><div class="table-wrap"><table>
+  return `<p class="muted">Del más reciente al más antiguo. Un cierre por día, con todo el movimiento. “Recibos” abre los del cierre para volver a guardarlos.</p><div class="table-wrap"><table>
     <thead><tr><th>N°</th><th>Fecha</th><th>Movs.</th><th>Efectivo esperado</th><th>Efectivo contado</th><th>Diferencia</th><th>Otros métodos</th><th>Total del día</th><th>Disp. efectivo</th><th>Disp. bancos</th><th>Observaciones</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
 }
@@ -2788,6 +2848,15 @@ function renderModal(){
   if(m.type==='rechazo') return renderMotivoModal('Rechazar abono', 'rechazar', m.movId);
   if(m.type==='reversa') return renderMotivoModal('Reversar abono', 'reversar', m.movId);
   if(m.type==='rechazo-solicitud') return renderMotivoModal('Rechazar solicitud de préstamo', 'rechazar-solicitud', m.solId);
+  if(m.type==='recibos-cierre'){
+    const filas = recibosDelCierre(m.numero);
+    return `<div class="overlay" data-action="cerrar-modal-bg">
+      <div class="modal" style="max-width:520px;">
+        <div class="modal-head"><h3>Recibos del cierre ${m.numero}</h3><button class="close-x" data-action="cerrar-modal">✕</button></div>
+        ${listaRecibosImprimibles(filas)}
+      </div>
+    </div>`;
+  }
   if(m.type==='texto-copiar') return `<div class="overlay" data-action="cerrar-modal-bg">
     <div class="modal" style="max-width:520px;">
       <div class="modal-head"><h3>Copiá este mensaje</h3><button class="close-x" data-action="cerrar-modal">✕</button></div>
@@ -2803,6 +2872,31 @@ function renderModal(){
   </div>`;
   return '';
 }
+/* Los cierres que vienen de la base no traen el detalle: no hacía falta
+   guardarlo porque cada movimiento sabe en qué cierre entró. Se rehace desde
+   ahí, para poder reimprimir los recibos de cualquier cierre, no solo del
+   que se acaba de hacer. */
+function recibosDelCierre(numero){
+  return MOVS
+    .filter(m => m.cierreNumero === numero && m.reciboNumero)
+    .map(m => {
+      const r = RECIBOS.find(x => x.numero === m.reciboNumero);
+      const p = prestamoById(m.prestamoId);
+      return { recibo: m.reciboNumero, cliente: r ? r.cliente : (p ? p.cliente : ''),
+               metodo: m.metodo, monto: m.monto, anulado: r ? r.anulado : false };
+    })
+    .sort((a,b) => a.recibo.localeCompare(b.recibo));
+}
+
+function listaRecibosImprimibles(filas){
+  if(!filas.length) return '<p class="muted">Este cierre no dejó recibos.</p>';
+  return filas.map(d=>`
+    <div class="kv" style="align-items:center; gap:8px;">
+      <span class="k">${d.recibo} · ${d.cliente} · ${d.metodo} · ${formatMoney(d.monto)}${d.anulado?' · <b style="color:var(--danger)">ANULADO</b>':''}</span>
+      <button class="btn btn-primary btn-sm no-print" data-action="pdf-recibo" data-numero="${d.recibo}" data-reimpresion="0">Guardar PDF</button>
+    </div>`).join('');
+}
+
 function renderCierreModal(ci){
   const dif = ci.contado - ci.esperado;
   const etiqueta = dif===0 ? 'cuadra' : dif>0 ? 'sobrante' : 'faltante';
@@ -2810,6 +2904,12 @@ function renderCierreModal(ci){
   return `<div class="overlay" data-action="cerrar-modal-bg">
     <div class="modal" style="max-width:560px;">
       <div class="modal-head"><h3>Cierre del día ${ci.numero}</h3><button class="close-x" data-action="cerrar-modal">✕</button></div>
+
+      <h4 style="margin:4px 0 4px;">Recibos de este cierre (${todos.length})</h4>
+      <p class="muted" style="font-size:12px; margin:0 0 8px;">Guardá el que le vayás a entregar al cliente. Después también los encontrás en Tablas → Cierres.</p>
+      ${listaRecibosImprimibles(todos)}
+      <div class="divider"></div>
+
       <div class="recibo">
         <div class="r-head">${svgLogo(30)}<div class="muted" style="font-size:11px;">Cierre del día · N° ${ci.numero}</div></div>
         <table>
@@ -2829,14 +2929,7 @@ function renderCierreModal(ci){
         </table>
         ${ci.observaciones?`<div class="legal" style="text-align:left;"><b>Observaciones:</b> ${ci.observaciones}</div>`:''}
       </div>
-      <button class="btn btn-primary btn-block" style="margin-top:12px;" data-action="pdf-cierre" data-numero="${ci.numero}" data-reimpresion="0">Guardar PDF del cierre</button>
-      <h4 style="margin:16px 0 8px;">Recibos del cierre (${todos.length})</h4>
-      <p class="muted" style="font-size:12px; margin-bottom:8px;">Guardá el que necesités entregar al cliente.</p>
-      ${todos.map(d=>`
-        <div class="kv" style="align-items:center; gap:8px;">
-          <span class="k">${d.recibo} · ${d.cliente} · ${d.metodo} · ${formatMoney(d.monto)}</span>
-          <button class="btn btn-ghost btn-sm" data-action="pdf-recibo" data-numero="${d.recibo}" data-reimpresion="0">Guardar PDF</button>
-        </div>`).join('')}
+      <button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="pdf-cierre" data-numero="${ci.numero}" data-reimpresion="0">Guardar PDF del cierre</button>
     </div>
   </div>`;
 }
@@ -2924,6 +3017,7 @@ document.addEventListener('click', async function(e){
   if(action==='pdf-recibo'){ abrirPdfRecibo(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-cierre'){ abrirPdfCierre(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-reversa'){ abrirPdfReversa(t.dataset.mov); return; }
+  if(action==='ver-recibos-cierre'){ STATE.modal = {type:'recibos-cierre', numero:t.dataset.numero}; render(); return; }
   if(action==='ir-registro'){ e.preventDefault(); STATE.pantallaEntrada='registro'; avisoLogin(''); render(); return; }
   if(action==='ir-login'){ e.preventDefault(); STATE.pantallaEntrada='login'; avisoLogin(''); render(); return; }
   if(action==='cambiar-rol-acceso'){ return; }
@@ -3027,17 +3121,31 @@ document.addEventListener('click', async function(e){
       const montoInput = document.querySelector(`.caja-monto-input[data-mov="${mov.id}"]`);
       const montoFinal = montoInput ? parseMoneyInputValue(montoInput.value) : mov.monto;
       const montoOriginal = Number(c.dataset.montoOriginal)||mov.monto;
-      if(montoFinal !== montoOriginal){
+
+      // La rebaja se vuelve a decidir aquí contra el monto que de verdad se
+      // contó, no contra el que se registró. Si no alcanza para saldar, cae a
+      // cero aunque el movimiento la trajera puesta y aunque el campo esté
+      // escondido: lo que vale es esta cuenta, no lo que quedó en pantalla.
+      const suger  = montoInput ? Number(montoInput.dataset.suger)||0 : 0;
+      const aplica = montoInput ? montoInput.dataset.aplica === '1' : false;
+      const saldo  = montoInput ? Number(montoInput.dataset.saldo)||0 : 0;
+      const rebajaInput = document.querySelector(`.caja-rebaja-input[data-mov="${mov.id}"]`);
+      const rebajaPedida = rebajaInput ? parseMoneyInputValue(rebajaInput.value) : 0;
+      const alcanza = aplica && montoFinal >= (saldo - rebajaPedida - 1);
+      const rebajaFinal = alcanza ? rebajaPedida : 0;
+      const rebajaCambio = Math.round(rebajaFinal) !== Math.round(mov.rebajaAplicada || 0);
+
+      if(montoFinal !== montoOriginal || rebajaCambio){
         const wrap = document.querySelector(`.caja-monto-motivo-wrap[data-mov="${mov.id}"]`);
         if(wrap && !wrap.querySelector('textarea')){
-          wrap.innerHTML = `<div class="field"><label>Motivo del ajuste (obligatorio)</label><textarea class="caja-motivo-txt" placeholder="Explica por qué el monto contado es distinto..."></textarea></div>`;
+          wrap.innerHTML = `<div class="field"><label>Motivo del ajuste (obligatorio)</label><textarea class="caja-motivo-txt" placeholder="Explica por qué el monto contado o la rebaja son distintos..."></textarea></div>`;
           faltaMotivo = true; return;
         }
         const motivoTxt = wrap.querySelector('textarea').value.trim();
         if(!motivoTxt){ faltaMotivo = true; return; }
-        pendientes.push({movId: mov.id, montoFinal, motivo: motivoTxt});
+        pendientes.push({movId: mov.id, montoFinal, motivo: motivoTxt, rebajaFinal});
       } else {
-        pendientes.push({movId: mov.id, montoFinal});
+        pendientes.push({movId: mov.id, montoFinal, rebajaFinal});
       }
     });
     if(faltaMotivo){ toast('Indica el motivo del ajuste antes de confirmar.'); return; }
@@ -3048,7 +3156,7 @@ document.addEventListener('click', async function(e){
     // con los saldos ya actualizados por todas las confirmaciones.
     const movIds = [];
     for(const pen of pendientes){
-      const id = await confirmarCaja(pen.movId, pen.montoFinal, pen.motivo);
+      const id = await confirmarCaja(pen.movId, pen.montoFinal, pen.motivo, pen.rebajaFinal);
       if(id) movIds.push(id);
     }
     if(!movIds.length && !otrosMovs.length){ toast('No se pudo confirmar ningún abono.'); return; }
@@ -3266,6 +3374,7 @@ document.addEventListener('input', function(e){
     actualizarTotalesCaja();
     return;
   }
+  if(e.target.classList.contains('caja-monto-input')) revisarRebajaCaja(e.target.dataset.mov);
   if(e.target.id==='caja-contado' || e.target.classList.contains('caja-monto-input')){
     actualizarTotalesCaja();
     return;
