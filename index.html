@@ -444,7 +444,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '1.6';
+const APP_VERSION = '1.7';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -546,6 +546,7 @@ function filaAMovimiento(r){
     aprobadoPor: r.aprobado_por || '',
     aprobadoEn: isoADmy(r.aprobado_en),
     motivoRechazo: r.motivo_rechazo || '',
+    corrigeA: r.corrige_a || null,
     reciboNumero: r.recibo_numero || null,
     cierreNumero: r.cierre_numero || null
   };
@@ -576,7 +577,7 @@ function filaAbonoHistorico(r, prestamosPorNumero){
     socioId: p ? p.socioId : null,
     aprobadoPor: 'Carga inicial (Excel)',
     aprobadoEn: isoADmy(r.fecha),
-    motivoRechazo: '', reciboNumero: null, cierreNumero: null
+    motivoRechazo: '', corrigeA: null, reciboNumero: null, cierreNumero: null
   };
 }
 
@@ -1522,7 +1523,7 @@ function goto(screen, params={}){
 }
 function closeModal(){ STATE.modal = null; render(); }
 
-async function registrarAbono({prestamoId, fecha, monto, metodo, nota, rebaja, porAdmin, socioObjetivo, comprobanteImg}){
+async function registrarAbono({prestamoId, fecha, monto, metodo, nota, rebaja, porAdmin, socioObjetivo, comprobanteImg, corrigeA}){
   const esEfectivo = metodo === 'Efectivo';
   const socioNombre = porAdmin ? socioObjetivo : STATE.socioActivo;
   const socioId = socioIdPorNombre(socioNombre);
@@ -1537,6 +1538,7 @@ async function registrarAbono({prestamoId, fecha, monto, metodo, nota, rebaja, p
     nota: nota || '',
     comprobante_url: comprobanteImg || '',
     rebaja_aplicada: Math.round(rebaja || 0),
+    corrige_a: corrigeA || null,
     // El estado lo decide el metodo, no quien registra: el efectivo espera
     // el cierre de caja y lo demas espera la aprobacion del administrador.
     estado: esEfectivo ? 'reportado_pendiente_caja' : 'pendiente',
@@ -1969,7 +1971,11 @@ function renderCarteraListInner(){
 function renderMiCartera(){
   const counts = {Vigente:0, Vencido:0, Cancelado:0};
   socioLoans(STATE.socioActivo).forEach(p=>counts[calcEstado(p)]++);
+  // Los rechazados van de primeros y en la pantalla donde el socio aterriza:
+  // si solo estuvieran en "Registrar abono" nadie se enteraría de que hay
+  // algo devuelto esperando.
   return `
+  ${renderRechazadosSocio(STATE.socioActivo)}
   <div class="card">
     <h2>Mi cartera</h2>
     <p class="muted">${STATE.socioActivo} · ${socioLoans(STATE.socioActivo).length} préstamos</p>
@@ -2072,7 +2078,10 @@ function renderSimuladorCancelacion(p){
 function renderRegistrarAbono(esAdmin){
   const socioSel = esAdmin ? (STATE.screenParams.socioSel || SEED.socios[0].nombre) : STATE.socioActivo;
   const loans = socioLoans(socioSel).filter(p=>calcEstado(p)!=='Cancelado');
-  const preselect = STATE.screenParams.preselect || '';
+  // Si venimos de "Corregir y volver a enviar", el formulario llega con los
+  // datos del rechazado puestos para que solo haya que arreglar lo señalado.
+  const corrigiendo = STATE.screenParams.corrige ? movPorId(STATE.screenParams.corrige) : null;
+  const preselect = (corrigiendo && corrigiendo.prestamoId) || STATE.screenParams.preselect || '';
   const esPropioAdmin = esAdmin && socioSel === CONFIG.socioAdmin;
   return `
   <div class="card">
@@ -2086,7 +2095,12 @@ function renderRegistrarAbono(esAdmin){
       </div>
       ${esPropioAdmin? '<div class="notice warn">Este préstamo es del propio administrador. Requiere segunda revisión antes de aprobarlo.</div>' : ''}
     ` : ''}
-    <form data-form="registrar-abono" data-admin="${esAdmin?1:0}" data-socio="${socioSel}">
+    ${corrigiendo ? `<div class="notice warn">
+      Estás corrigiendo un abono que fue rechazado.
+      <div style="margin-top:4px;"><b>Motivo:</b> ${corrigiendo.motivoRechazo || 'sin motivo anotado'}</div>
+      <div style="margin-top:4px; font-size:12.5px;">El original se conserva como rechazado. Este se envía como uno nuevo, ligado a aquel.</div>
+    </div>` : ''}
+    <form data-form="registrar-abono" data-admin="${esAdmin?1:0}" data-socio="${socioSel}" data-corrige="${corrigiendo?corrigiendo.id:''}">
       <div class="field">
         <label>N° de préstamo (busca por cliente)</label>
         <div class="autocomplete-wrap">
@@ -2098,25 +2112,26 @@ function renderRegistrarAbono(esAdmin){
       </div>
       <div class="field">
         <label>Fecha REAL en que pagó el cliente</label>
-        <input type="date" name="fecha" required>
+        <input type="date" name="fecha" required value="${corrigiendo ? dmyToInputDate(corrigiendo.fecha) : ''}">
         <span class="hint">No la fecha de hoy si el cliente pagó otro día — esta fecha se usa para calcular intereses y vencimiento.</span>
       </div>
       <div class="field">
         <label>Monto abonado</label>
-        <input type="text" inputmode="numeric" class="money-input" name="monto" required placeholder="₡0">
+        <input type="text" inputmode="numeric" class="money-input" name="monto" required placeholder="₡0" value="${corrigiendo ? moneyInputValue(corrigiendo.monto) : ''}">
       </div>
       <div id="rebaja-preview"></div>
       <div class="field">
         <label>Método de pago</label>
         <div class="radio-group">
-          ${['Efectivo','Transferencia','SINPE Móvil'].map((m,i)=>`
-            <label class="radio-opt ${i===0?'checked':''}"><input type="radio" name="metodo" value="${m}" ${i===0?'checked':''}>${m}</label>
-          `).join('')}
+          ${['Efectivo','Transferencia','SINPE Móvil'].map((m,i)=>{
+            const elegido = corrigiendo ? m===corrigiendo.metodo : i===0;
+            return `<label class="radio-opt ${elegido?'checked':''}"><input type="radio" name="metodo" value="${m}" ${elegido?'checked':''}>${m}</label>`;
+          }).join('')}
         </div>
       </div>
       <div class="field">
         <label>Nota o N° de comprobante (opcional)</label>
-        <textarea name="nota" placeholder="Ej: comprobante SINPE 123456"></textarea>
+        <textarea name="nota" placeholder="Ej: comprobante SINPE 123456">${corrigiendo ? (corrigiendo.nota||'') : ''}</textarea>
       </div>
       <div class="field">
         <label>Foto del comprobante (opcional)</label>
@@ -2166,12 +2181,46 @@ function renderHistorialSocioInner(socio){
       <div class="mov-top"><span>${p.cliente} · N° ${p.id}</span>${pillMovEstado(m)}</div>
       <div class="mov-meta">${formatMoney(m.monto)} · ${m.metodo} · Fecha: ${m.fecha}${m.aprobadoPor?` · Aprobado por: ${m.aprobadoPor}`:''}${m.reciboNumero?` · Recibo ${m.reciboNumero}`:''}</div>
       ${m.motivoRechazo?`<div class="mov-meta" style="color:var(--danger)">Motivo de rechazo: ${m.motivoRechazo}</div>`:''}
+      ${MOVS.some(x=>mismoId(x.corrigeA, m.id))?`<div class="mov-meta">Ya se envió corregido.</div>`:''}
+      ${m.corrigeA?`<div class="mov-meta">Corrige un abono que había sido rechazado.</div>`:''}
       ${m.reciboNumero?`<button class="btn btn-ghost btn-sm no-print" style="margin-top:6px;" data-action="pdf-recibo" data-numero="${m.reciboNumero}" data-reimpresion="1">Reimprimir recibo</button>`:''}
     </div>`;
   }).join('');
 }
+/* Un abono rechazado que todavía nadie corrigió. El rechazado no se edita ni
+   se borra: se registra uno nuevo que apunta a él, y así el historial cuenta
+   lo que pasó de verdad. */
+function rechazadosSinCorregir(socio){
+  const corregidos = new Set(MOVS.filter(m=>m.corrigeA).map(m=>String(m.corrigeA)));
+  return movimientosPorSocio(socio)
+    .filter(m => m.estado==='rechazado' && !corregidos.has(String(m.id)))
+    .sort((a,b)=>(b.seq||0)-(a.seq||0));
+}
+
+function renderRechazadosSocio(socio){
+  const movs = rechazadosSinCorregir(socio);
+  if(!movs.length) return '';
+  return `<div class="card">
+    <h3>Abonos que hay que corregir (${movs.length})</h3>
+    <p class="muted">El administrador devolvió estos abonos. Arreglá lo que te indica y volvelos a enviar: el original se conserva con su motivo, no se borra.</p>
+    ${movs.map(m=>{
+      const p = prestamoById(m.prestamoId);
+      return `<div class="mov-item rechazado">
+        <div class="mov-top"><span>${p ? p.cliente + ' · N° ' + p.id : m.prestamoId}</span><span class="pill pill-rechazado">Rechazado</span></div>
+        <div class="mov-meta">${formatMoney(m.monto)} · ${m.metodo} · Fecha de pago: ${m.fecha}</div>
+        <div class="mov-meta" style="color:var(--danger)"><b>Motivo:</b> ${m.motivoRechazo || 'sin motivo anotado'}</div>
+        ${m.nota?`<div class="mov-meta">Tu nota: ${m.nota}</div>`:''}
+        <div class="no-print" style="margin-top:8px;">
+          <button class="btn btn-primary btn-sm" data-action="corregir-abono" data-mov="${m.id}">Corregir y volver a enviar</button>
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
 function renderMisPendientesYHistorial(socio){
   return `
+  ${renderRechazadosSocio(socio)}
   <div class="card">
     <h3>Mis abonos pendientes de aprobación</h3>
     <div id="mis-pendientes-list">${renderPendientesSocioInner(socio)}</div>
@@ -3025,6 +3074,14 @@ document.addEventListener('click', async function(e){
   if(action==='pdf-cierre'){ abrirPdfCierre(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-reversa'){ abrirPdfReversa(t.dataset.mov); return; }
   if(action==='ver-recibos-cierre'){ STATE.modal = {type:'recibos-cierre', numero:t.dataset.numero}; render(); return; }
+  if(action==='corregir-abono'){
+    const m = movPorId(t.dataset.mov);
+    if(!m) return;
+    STATE.screen = STATE.role==='admin' ? 'registrarSocio' : 'registrar';
+    STATE.screenParams = { corrige: m.id, socioSel: STATE.screenParams.socioSel };
+    render();
+    return;
+  }
   if(action==='ir-registro'){ e.preventDefault(); STATE.pantallaEntrada='registro'; avisoLogin(''); render(); return; }
   if(action==='ir-login'){ e.preventDefault(); STATE.pantallaEntrada='login'; avisoLogin(''); render(); return; }
   if(action==='cambiar-rol-acceso'){ return; }
@@ -3500,7 +3557,9 @@ document.addEventListener('submit', async function(e){
     const esAdmin = f.dataset.admin==='1';
     const socioObjetivo = f.dataset.socio;
     const comprobanteImg = f.comprobanteImg.value;
-    await registrarAbono({prestamoId, fecha:fechaStr, monto, metodo, nota, rebaja: esCancelacionTemprana?suger.rebajaSugerida:0, porAdmin:esAdmin, socioObjetivo, comprobanteImg});
+    const corrigeA = f.dataset.corrige || null;
+    await registrarAbono({prestamoId, fecha:fechaStr, monto, metodo, nota, rebaja: esCancelacionTemprana?suger.rebajaSugerida:0, porAdmin:esAdmin, socioObjetivo, comprobanteImg, corrigeA});
+    STATE.screenParams = {};
     goto(esAdmin?'aprobar':'cartera');
   }
   if(e.target.dataset.form==='solicitar-prestamo'){
