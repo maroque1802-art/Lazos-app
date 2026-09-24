@@ -194,6 +194,19 @@ main{padding:16px 0 40px;}
 .login-wrap .pie-legal{border-top:none; margin-top:26px;}
 .pie-version{opacity:.7;}
 
+/* ---------- Vitácora ---------- */
+.bit-item{border-left:3px solid var(--border); padding:10px 13px; margin-bottom:9px; border-radius:0 8px 8px 0; background:var(--bg-alt);}
+.bit-top{display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;}
+.bit-cambios{margin-top:8px;}
+.bit-campo{display:flex; align-items:baseline; gap:7px; flex-wrap:wrap; font-size:13.5px; padding:2px 0; min-width:0;}
+/* La fila borrada se guarda entera y puede ser larga: que corte, no que se
+   salga de la tarjeta. */
+.bit-campo code{white-space:pre-wrap; overflow-wrap:anywhere; max-width:100%;}
+.bit-nombre{font-weight:700; min-width:130px;}
+.bit-antes{color:var(--text-muted); text-decoration:line-through;}
+.bit-flecha{color:var(--text-muted);}
+.bit-despues{font-weight:700;}
+
 /* ---------- Accesos ---------- */
 .acceso-item{border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px 14px; margin-bottom:10px; background:var(--bg-alt);}
 .acceso-top{display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap;}
@@ -406,10 +419,13 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
+/* Vitácora de cambios hechos por fuera del flujo normal. Solo la ve el
+   administrador, y nadie la puede editar: la escriben triggers en Postgres. */
+const BITACORA = [];
 const RECIBOS = [];
 const CIERRES = [];
 /* Denominaciones de colon costarricense en circulacion, de mayor a menor. */
@@ -680,6 +696,24 @@ function nuevoCodigoRegistro(){
   return Array.from(bytes, b => ALFABETO_CODIGO[b % ALFABETO_CODIGO.length]).join('');
 }
 
+/* Todo lo que la sesión trajo consigo, para soltarlo al salir. */
+function olvidarDatos(){
+  [SEED.socios, SEED.prestamos, SEED.abonos, MOVS, RECIBOS, CIERRES,
+   SOLICITUDES, ACCESOS, BITACORA].forEach(a => { a.length = 0; });
+}
+
+async function cargarBitacora(){
+  BITACORA.length = 0;
+  const { data, error } = await sb.from('bitacora')
+    .select('*').order('ocurrido_en', { ascending: false }).limit(300);
+  if(error) return;   // sin la migración 0006 la tabla no existe; no es motivo de alarma
+  (data || []).forEach(r => BITACORA.push({
+    id: r.id, cuando: r.ocurrido_en, tabla: r.tabla, registro: r.registro,
+    operacion: r.operacion, cambios: r.cambios || {},
+    motivo: r.motivo || '', hechoPor: r.hecho_por || ''
+  }));
+}
+
 async function cargarAccesos(){
   ACCESOS.length = 0;
   const { data, error } = await sb.rpc('estado_accesos');
@@ -756,7 +790,7 @@ async function conGuardado(fn, mensajeOk){
   try{
     await fn();
     await cargarTodo();
-    if(STATE.role === 'admin') await cargarAccesos();
+    if(STATE.role === 'admin'){ await cargarAccesos(); await cargarBitacora(); }
     // El mensaje puede ser una función cuando depende del resultado, como el
     // consecutivo que asigna la base al guardar.
     const msg = typeof mensajeOk === 'function' ? mensajeOk() : mensajeOk;
@@ -2415,6 +2449,63 @@ function renderCierreCaja(){
 }
 
 /* ---------- ADMIN: Tablas ---------- */
+/* Lo que quedó anotado al tocar los datos por fuera de la aplicación. */
+function renderTablaBitacora(){
+  if(BITACORA.length===0) return `<div class="empty">
+    Todavía no hay nada anotado. Aquí van a caer solos los cambios que hagas
+    desde el editor SQL de Supabase: qué tocaste, qué decía antes y qué dice
+    ahora, y el motivo si lo escribiste.
+  </div>`;
+
+  const nombreTabla = {prestamos:'Préstamo', socios:'Socio', abonos:'Abono',
+                       config:'Configuración', movimientos:'Movimiento'};
+  const nombreOp = {insert:'Agregado', update:'Modificado', delete:'Borrado'};
+  const claseOp = {insert:'pill-cancelado', update:'pill-pendiente', delete:'pill-rechazado'};
+
+  const filas = BITACORA.map(b => {
+    const detalle = b.cambios.fila
+      ? `<div class="bit-campo"><span class="muted">la fila entera</span> ${valorBitacora(b.cambios.fila)}</div>`
+      : Object.entries(b.cambios).map(([campo, v]) => `<div class="bit-campo">
+          <span class="bit-nombre">${campo}</span>
+          <span class="bit-antes">${valorBitacora(v.antes)}</span>
+          <span class="bit-flecha">→</span>
+          <span class="bit-despues">${valorBitacora(v.despues)}</span>
+        </div>`).join('');
+
+    return `<div class="bit-item">
+      <div class="bit-top">
+        <div>
+          <span class="pill ${claseOp[b.operacion]||''}">${nombreOp[b.operacion]||b.operacion}</span>
+          <strong style="margin-left:8px;">${nombreTabla[b.tabla]||b.tabla} ${b.registro}</strong>
+        </div>
+        <span class="muted" style="font-size:12px;">${fechaHoraBitacora(b.cuando)}</span>
+      </div>
+      <div class="bit-cambios">${detalle}</div>
+      <div class="muted" style="font-size:12.5px; margin-top:7px;">
+        ${b.motivo ? '“'+b.motivo+'” · ' : '<em>Sin motivo anotado</em> · '}${b.hechoPor}
+      </div>
+    </div>`;
+  }).join('');
+
+  return `<p class="muted">Del más reciente al más antiguo. Se escribe sola y no se puede editar ni borrar, ni siquiera desde acá.</p>${filas}`;
+}
+
+function valorBitacora(v){
+  if(v === null || v === undefined) return '<span class="muted">vacío</span>';
+  if(typeof v === 'object') return '<code style="font-size:11.5px;">' + JSON.stringify(v) + '</code>';
+  if(typeof v === 'number') return formatMoney(v);
+  // Los montos llegan como texto desde numeric(14,2).
+  if(/^-?\d+(\.\d+)?$/.test(String(v))) return formatMoney(Number(v));
+  return String(v);
+}
+
+function fechaHoraBitacora(iso){
+  const d = new Date(iso);
+  if(isNaN(d)) return String(iso||'');
+  const dos = n => String(n).padStart(2,'0');
+  return `${dos(d.getDate())}/${dos(d.getMonth()+1)}/${d.getFullYear()} ${dos(d.getHours())}:${dos(d.getMinutes())}`;
+}
+
 function renderTablas(){
   const sub = STATE.screenParams.tabla || 'prestamos';
   return `
@@ -2427,8 +2518,9 @@ function renderTablas(){
       <button class="chip ${sub==='resumen'?'active':''}" data-action="tabla-tab" data-val="resumen">Resumen</button>
       <button class="chip ${sub==='recibos'?'active':''}" data-action="tabla-tab" data-val="recibos">Recibos</button>
       <button class="chip ${sub==='cierres'?'active':''}" data-action="tabla-tab" data-val="cierres">Cierres de caja</button>
+      <button class="chip ${sub==='bitacora'?'active':''}" data-action="tabla-tab" data-val="bitacora">Vitácora</button>
     </div>
-    ${sub==='prestamos'?renderTablaPrestamos():sub==='abonos'?renderTablaAbonos():sub==='recibos'?renderTablaRecibos():sub==='cierres'?renderTablaCierres():renderTablaResumen()}
+    ${sub==='prestamos'?renderTablaPrestamos():sub==='abonos'?renderTablaAbonos():sub==='recibos'?renderTablaRecibos():sub==='cierres'?renderTablaCierres():sub==='bitacora'?renderTablaBitacora():renderTablaResumen()}
   </div>`;
 }
 function renderTablaRecibos(){
@@ -2780,7 +2872,13 @@ document.addEventListener('click', async function(e){
   const action = t.dataset.action;
 
   if(action==='salir'){
-    sb.auth.signOut().then(()=>{ STATE.role=null; STATE.socioActivo=null; STATE.sesion=null; render(); });
+    sb.auth.signOut().then(()=>{
+      STATE.role=null; STATE.socioActivo=null; STATE.sesion=null;
+      // Sin esto, lo que cargó el administrador se queda en memoria cuando
+      // entra otra persona en el mismo navegador.
+      olvidarDatos();
+      render();
+    });
     return;
   }
   if(action==='goto'){
@@ -3355,7 +3453,14 @@ async function entrar(sesion){
   }
 
   STATE.role = perfil.rol === 'administrador' ? 'admin' : 'socio';
-  if(STATE.role === 'admin') await cargarAccesos();
+  if(STATE.role === 'admin'){
+    await cargarAccesos();
+    await cargarBitacora();
+  }else{
+    // Un socio no tiene por qué llevar encima lo que vio el administrador.
+    ACCESOS.length = 0;
+    BITACORA.length = 0;
+  }
   const socio = SEED.socios.find(x => x.id === perfil.socio_id);
   STATE.socioActivo = socio ? socio.nombre : null;
 
