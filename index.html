@@ -194,6 +194,18 @@ main{padding:16px 0 40px;}
 .login-wrap .pie-legal{border-top:none; margin-top:26px;}
 .pie-version{opacity:.7;}
 
+/* ---------- Accesos ---------- */
+.acceso-item{border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px 14px; margin-bottom:10px; background:var(--bg-alt);}
+.acceso-top{display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap;}
+.acceso-nombre{font-weight:800;}
+.acceso-codigo{display:flex; align-items:center; gap:10px; margin-top:9px;}
+.acceso-codigo code{
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:17px; font-weight:700;
+  letter-spacing:3px; background:var(--card); border:1px dashed var(--c-accent);
+  border-radius:8px; padding:5px 11px; color:var(--text); user-select:all;
+}
+.acceso-botones{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
+
 .fila-anulada td{opacity:.55; text-decoration:line-through;}
 .fila-anulada td:first-child, .fila-anulada td:last-child, .fila-anulada td:nth-last-child(2){text-decoration:none; opacity:1;}
 /* lists */
@@ -394,7 +406,10 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '1.0';
+const APP_VERSION = '1.1';
+/* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
+   función estado_accesos() no le devuelve nada a nadie más. */
+const ACCESOS = [];
 const RECIBOS = [];
 const CIERRES = [];
 /* Denominaciones de colon costarricense en circulacion, de mayor a menor. */
@@ -418,7 +433,8 @@ const STATE = {
   historialDesde: '',
   historialHasta: '',
   modal: null,
-  theme: null
+  theme: null,
+  pantallaEntrada: 'login'   // 'login' | 'registro', antes de tener sesion
 };
 
 
@@ -653,10 +669,94 @@ function socioIdPorNombre(nombre){
 }
 
 /* Envuelve una operacion: muestra el error si falla y recarga si sale bien. */
+/* ============ ACCESOS: quién puede entrar ============ */
+
+/* El código lo genera el navegador con el generador criptográfico, no con
+   Math.random. Sin 0/O ni 1/I/L: se dicta por teléfono y se copia a mano. */
+const ALFABETO_CODIGO = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+function nuevoCodigoRegistro(){
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => ALFABETO_CODIGO[b % ALFABETO_CODIGO.length]).join('');
+}
+
+async function cargarAccesos(){
+  ACCESOS.length = 0;
+  const { data, error } = await sb.rpc('estado_accesos');
+  if(error){ toast(mensajeDeErrorSb(error)); return; }
+  (data || []).forEach(r => ACCESOS.push({
+    correo: r.correo, nombre: r.nombre || '', rol: r.rol,
+    socioId: r.socio_id, socio: r.socio || '',
+    codigo: r.codigo || '', codigoUsado: !!r.codigo_usado,
+    tieneCuenta: !!r.tiene_cuenta, tienePerfil: !!r.tiene_perfil
+  }));
+}
+
+function accesoPorCorreo(correo){
+  return ACCESOS.find(a => a.correo.toLowerCase() === String(correo).toLowerCase());
+}
+
+/* El enlace que se le manda a la persona. Es la misma dirección de la app
+   con ?registro; el correo y el código van aparte, en el mensaje. */
+function enlaceDeRegistro(){
+  return location.origin + location.pathname + '?registro';
+}
+
+function mensajeParaSocio(a){
+  return `Hola${a.nombre ? ' ' + a.nombre.split(' ')[0] : ''}, ya te di acceso a Lazos.\n\n`
+    + `1. Abrí este enlace: ${enlaceDeRegistro()}\n`
+    + `2. Poné tu correo: ${a.correo}\n`
+    + `3. Tu código: ${a.codigo}\n`
+    + `4. Elegí la contraseña que quieras.\n\n`
+    + `El código sirve una sola vez y es solo tuyo, no lo compartás.`;
+}
+
+async function guardarAcceso({correo, nombre, rol, socioId}){
+  const codigo = nuevoCodigoRegistro();
+  await conGuardado(async () => {
+    const { error } = await sb.from('asignaciones').upsert({
+      correo: correo.trim().toLowerCase(),
+      nombre: nombre.trim(),
+      rol,
+      socio_id: rol === 'socio' ? socioId : null,
+      codigo,
+      codigo_usado: false,
+      codigo_creado_en: new Date().toISOString()
+    }, { onConflict: 'correo' });
+    if(error) throw error;
+  }, 'Acceso guardado. Ya podés mandarle el enlace y el código.');
+}
+
+async function regenerarCodigo(correo){
+  const codigo = nuevoCodigoRegistro();
+  await conGuardado(async () => {
+    const { error } = await sb.from('asignaciones')
+      .update({ codigo, codigo_usado: false, codigo_creado_en: new Date().toISOString() })
+      .eq('correo', correo);
+    if(error) throw error;
+  }, 'Código nuevo generado. El anterior ya no sirve.');
+}
+
+async function quitarAcceso(correo){
+  await conGuardado(async () => {
+    const { error } = await sb.from('asignaciones').delete().eq('correo', correo);
+    if(error) throw error;
+  }, 'Acceso quitado de la lista.');
+}
+
+async function vincularCuenta(correo){
+  const { data, error } = await sb.rpc('vincular_cuenta', { p_correo: correo });
+  if(error){ toast(mensajeDeErrorSb(error)); return; }
+  await cargarAccesos();
+  toast(data || 'Listo.');
+  render();
+}
+
 async function conGuardado(fn, mensajeOk){
   try{
     await fn();
     await cargarTodo();
+    if(STATE.role === 'admin') await cargarAccesos();
     // El mensaje puede ser una función cuando depende del resultado, como el
     // consecutivo que asigna la base al guardar.
     const msg = typeof mensajeOk === 'function' ? mensajeOk() : mensajeOk;
@@ -1575,7 +1675,11 @@ async function reversarAbono(movId, motivo){
    ========================================================= */
 function render(){
   const app = document.getElementById('app');
-  if(!STATE.role){ app.innerHTML = renderLogin(); attachFormRefs(); return; }
+  if(!STATE.role){
+    app.innerHTML = STATE.pantallaEntrada === 'registro' ? renderRegistro() : renderLogin();
+    attachFormRefs();
+    return;
+  }
   app.innerHTML = renderHeader() + renderTabs()
     + `<main class="container">${renderScreen()}${renderPieLegal()}</main>`
     + renderBottomNav() + renderModal();
@@ -1607,7 +1711,54 @@ function renderLogin(){
       </form>
     </div>
 
-    <p class="login-nota">Acceso solo para socios y administración de Lazos.</p>
+    <p class="login-nota">
+      ¿Primera vez? <a href="#" data-action="ir-registro">Creá tu contraseña</a> con el código que te pasaron.
+    </p>
+    ${renderPieLegal()}
+  </div>`;
+}
+
+/* La pantalla donde el socio elige su contraseña. El código que escribe viaja
+   en los metadatos de signUp; quien decide si le arma perfil es un trigger en
+   Postgres, no esta pantalla. Si alguien la saltara y llamara a signUp por su
+   cuenta, tendría una cuenta que no muestra ningún dato. */
+function renderRegistro(){
+  return `
+  <div class="login-wrap">
+    <div class="login-marca">
+      ${svgLogo(64)}
+      <div class="login-hoja"></div>
+      <div class="login-lema">Creá tu contraseña</div>
+    </div>
+
+    <div class="card login-card">
+      <div id="login-aviso" class="notice warn" style="display:none;"></div>
+      <p class="muted" style="margin-top:0;">Usá el correo y el código que te pasó la administración de Lazos.</p>
+      <form id="form-registro">
+        <div class="field">
+          <label for="correo">Correo</label>
+          <input type="email" id="correo" autocomplete="username" inputmode="email" required placeholder="tu@correo.com">
+        </div>
+        <div class="field">
+          <label for="codigo">Código</label>
+          <input type="text" id="codigo" required autocapitalize="characters" autocomplete="one-time-code" placeholder="XXXXXXXX" style="letter-spacing:2px; text-transform:uppercase;">
+          <span class="hint">Los ocho caracteres que te mandaron. Sirve una sola vez.</span>
+        </div>
+        <div class="field">
+          <label for="clave">Contraseña nueva</label>
+          <input type="password" id="clave" autocomplete="new-password" required minlength="8" placeholder="Al menos 8 caracteres">
+        </div>
+        <div class="field">
+          <label for="clave2">Repetila</label>
+          <input type="password" id="clave2" autocomplete="new-password" required minlength="8" placeholder="La misma de arriba">
+        </div>
+        <button type="submit" class="btn btn-primary btn-block" id="btn-registrar">Crear mi contraseña</button>
+      </form>
+    </div>
+
+    <p class="login-nota">
+      ¿Ya tenés cuenta? <a href="#" data-action="ir-login">Entrá por aquí</a>.
+    </p>
     ${renderPieLegal()}
   </div>`;
 }
@@ -1641,7 +1792,7 @@ function renderHeader(){
 
 const ADMIN_TABS = [
   ['tablero','Tablero'], ['aprobar','Por aprobar'], ['registrarSocio','Registrar a nombre de socio'],
-  ['cierreCaja','Cierre de caja'], ['solicitudes','Solicitudes de préstamo'], ['tablas','Tablas'], ['config','Configuración']
+  ['cierreCaja','Cierre de caja'], ['solicitudes','Solicitudes de préstamo'], ['tablas','Tablas'], ['accesos','Accesos'], ['config','Configuración']
 ];
 const SOCIO_TABS = [ ['cartera','Mi cartera'], ['registrar','Registrar abono'], ['solicitar','Solicitar préstamo'] ];
 
@@ -1659,7 +1810,7 @@ function renderBottomNav(){
   </div>`;
 }
 function renderBottomNavAdmin(){
-  const icons = {tablero:'📊', aprobar:'✅', registrarSocio:'➕', cierreCaja:'💰', solicitudes:'📥', tablas:'📑', config:'⚙️'};
+  const icons = {tablero:'📊', aprobar:'✅', registrarSocio:'➕', cierreCaja:'💰', solicitudes:'📥', tablas:'📑', accesos:'👤', config:'⚙️'};
   return `<div class="bottom-nav no-print">
     ${ADMIN_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}" data-action="goto" data-screen="${id}"><span class="ic">${icons[id]}</span></button>`).join('')}
   </div>`;
@@ -1678,6 +1829,7 @@ function renderScreen(){
     if(STATE.screen==='cierreCaja') return renderCierreCaja();
     if(STATE.screen==='solicitudes') return renderSolicitudesAdmin();
     if(STATE.screen==='tablas') return renderTablas();
+    if(STATE.screen==='accesos') return renderAccesos();
     if(STATE.screen==='config') return renderConfig();
     if(STATE.screen==='detalle') return renderDetalle(STATE.screenParams.id, true);
   }
@@ -2375,6 +2527,93 @@ function renderTablaResumen(){
 }
 
 /* ---------- ADMIN: Configuración ---------- */
+/* ---------- ADMIN: Accesos ---------- */
+function estadoDelAcceso(a){
+  if(a.tienePerfil)  return {texto:'Ya entra', clase:'pill-cancelado'};
+  if(a.tieneCuenta)  return {texto:'Creó cuenta sin código', clase:'pill-rechazado'};
+  if(a.codigoUsado)  return {texto:'Código usado', clase:'pill-pendiente'};
+  return {texto:'Esperando que se registre', clase:'pill-pendiente'};
+}
+
+function renderAccesos(){
+  const sociosSinAcceso = SEED.socios.filter(s =>
+    !ACCESOS.some(a => a.socioId === s.id));
+
+  const filas = ACCESOS.map(a => {
+    const st = estadoDelAcceso(a);
+    return `<div class="acceso-item">
+      <div class="acceso-top">
+        <div>
+          <div class="acceso-nombre">${a.nombre || a.socio || a.correo}</div>
+          <div class="muted" style="font-size:12.5px;">${a.correo}${a.rol==='administrador'?' · Administrador':a.socio?' · '+a.socio:''}</div>
+        </div>
+        <span class="pill ${st.clase}">${st.texto}</span>
+      </div>
+      ${a.tienePerfil ? '' : a.codigo ? `<div class="acceso-codigo">
+        <span class="muted">Código</span><code>${a.codigo}</code>
+      </div>` : '<div class="muted" style="font-size:12.5px; margin-top:6px;">Sin código. Generá uno para que pueda registrarse.</div>'}
+      ${a.tieneCuenta && !a.tienePerfil ? `<div class="notice warn" style="margin-top:8px;">
+        Creó la cuenta pero el código no coincidió, así que no ve nada. Si estás seguro de que es la persona correcta, vinculala; si no, generale un código nuevo y que lo intente de nuevo con otro correo.
+      </div>` : ''}
+      <div class="acceso-botones no-print">
+        ${a.tienePerfil ? '' : `
+          <button class="btn btn-primary btn-sm" data-action="copiar-invitacion" data-correo="${a.correo}">Copiar mensaje</button>
+          <button class="btn btn-ghost btn-sm" data-action="regenerar-codigo" data-correo="${a.correo}">Código nuevo</button>`}
+        ${a.tieneCuenta && !a.tienePerfil ? `<button class="btn btn-ghost btn-sm" data-action="vincular-cuenta" data-correo="${a.correo}">Vincular</button>` : ''}
+        ${a.rol==='administrador' ? '' : `<button class="btn btn-danger btn-sm" data-action="quitar-acceso" data-correo="${a.correo}">Quitar</button>`}
+      </div>
+    </div>`;
+  }).join('');
+
+  return `
+  <div class="card">
+    <h2>Accesos</h2>
+    <p class="muted">Quién puede entrar a Lazos y qué ve cada quien. Un socio solo ve su propia cartera; el administrador ve todo.</p>
+    <div class="notice">
+      Cada persona elige su propia contraseña: vos nunca la ves ni la escribís.
+      Lo que le mandás es el enlace y un código de un solo uso, que es la prueba
+      de que ese correo es suyo. Sin código válido la cuenta se crea pero no
+      muestra ningún dato.
+    </div>
+    ${ACCESOS.length ? filas : '<div class="empty">Todavía no hay nadie en la lista.</div>'}
+  </div>
+
+  <div class="card">
+    <h3>Dar acceso a alguien</h3>
+    ${sociosSinAcceso.length ? `<p class="muted">Socios que todavía no tienen acceso: ${sociosSinAcceso.map(s=>s.nombre).join(', ')}.</p>` : ''}
+    <form id="form-acceso">
+      <div class="grid cols-2">
+        <div class="field">
+          <label for="acc-nombre">Nombre</label>
+          <input type="text" id="acc-nombre" name="nombre" required placeholder="Nombre y apellido">
+        </div>
+        <div class="field">
+          <label for="acc-correo">Correo</label>
+          <input type="email" id="acc-correo" name="correo" required inputmode="email" placeholder="correo@ejemplo.com">
+          <span class="hint">Con este correo va a entrar. Tiene que ser uno al que solo esa persona tenga acceso.</span>
+        </div>
+      </div>
+      <div class="grid cols-2">
+        <div class="field">
+          <label for="acc-rol">Rol</label>
+          <select id="acc-rol" name="rol" data-action="cambiar-rol-acceso">
+            <option value="socio">Socio</option>
+            <option value="administrador">Administrador</option>
+          </select>
+        </div>
+        <div class="field" id="acc-socio-wrap">
+          <label for="acc-socio">¿Cuál socio es?</label>
+          <select id="acc-socio" name="socioId">
+            ${SEED.socios.map(s=>`<option value="${s.id}">${s.nombre}</option>`).join('')}
+          </select>
+          <span class="hint">Es la cartera que va a ver. Cada socio puede tener una sola cuenta.</span>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary btn-block">Generar acceso y código</button>
+    </form>
+  </div>`;
+}
+
 function renderConfig(){
   return `
   <div class="card">
@@ -2436,6 +2675,13 @@ function renderModal(){
   if(m.type==='rechazo') return renderMotivoModal('Rechazar abono', 'rechazar', m.movId);
   if(m.type==='reversa') return renderMotivoModal('Reversar abono', 'reversar', m.movId);
   if(m.type==='rechazo-solicitud') return renderMotivoModal('Rechazar solicitud de préstamo', 'rechazar-solicitud', m.solId);
+  if(m.type==='texto-copiar') return `<div class="overlay" data-action="cerrar-modal-bg">
+    <div class="modal" style="max-width:520px;">
+      <div class="modal-head"><h3>Copiá este mensaje</h3><button class="close-x" data-action="cerrar-modal">✕</button></div>
+      <p class="muted">El navegador no dejó copiarlo solo. Mantené el dedo sobre el texto para seleccionarlo.</p>
+      <textarea readonly style="width:100%; min-height:190px;">${m.texto}</textarea>
+    </div>
+  </div>`;
   if(m.type==='imagen') return `<div class="overlay" data-action="cerrar-modal-bg">
     <div class="modal" style="max-width:640px;">
       <div class="modal-head"><h3>Comprobante</h3><button class="close-x" data-action="cerrar-modal">✕</button></div>
@@ -2559,6 +2805,27 @@ document.addEventListener('click', async function(e){
   if(action==='pdf-recibo'){ abrirPdfRecibo(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-cierre'){ abrirPdfCierre(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-reversa'){ abrirPdfReversa(t.dataset.mov); return; }
+  if(action==='ir-registro'){ e.preventDefault(); STATE.pantallaEntrada='registro'; avisoLogin(''); render(); return; }
+  if(action==='ir-login'){ e.preventDefault(); STATE.pantallaEntrada='login'; avisoLogin(''); render(); return; }
+  if(action==='cambiar-rol-acceso'){ return; }
+  if(action==='copiar-invitacion'){
+    const a = accesoPorCorreo(t.dataset.correo);
+    if(!a) return;
+    await copiarAlPortapapeles(mensajeParaSocio(a), 'Mensaje copiado. Pegalo donde se lo vayas a mandar.');
+    return;
+  }
+  if(action==='regenerar-codigo'){ await regenerarCodigo(t.dataset.correo); return; }
+  if(action==='vincular-cuenta'){ await vincularCuenta(t.dataset.correo); return; }
+  if(action==='quitar-acceso'){
+    const a = accesoPorCorreo(t.dataset.correo);
+    if(!a) return;
+    const aviso = a.tienePerfil
+      ? `Vas a quitar a ${a.nombre || a.correo} de la lista. Su cuenta sigue existiendo, pero deja de ver datos.`
+      : `Vas a quitar a ${a.nombre || a.correo} de la lista.`;
+    if(!confirm(aviso)) return;
+    await quitarAcceso(t.dataset.correo);
+    return;
+  }
   if(action==='quitar-comprobante'){
     const form = t.closest('form');
     form.querySelector('#comprobante-file').value = '';
@@ -2730,6 +2997,12 @@ document.addEventListener('click', async function(e){
 document.addEventListener('change', function(e){
   if(e.target.classList.contains('caja-check')){ actualizarTotalesCaja(); return; }
 
+  if(e.target.id==='acc-rol'){
+    // Un administrador no se ata a una cartera: ve todas.
+    const wrap = document.getElementById('acc-socio-wrap');
+    if(wrap) wrap.style.display = e.target.value === 'administrador' ? 'none' : '';
+    return;
+  }
   if(e.target.id==='reg-socio'){ STATE.screenParams = {...STATE.screenParams, socioSel:e.target.value}; render(); return; }
   if(e.target.id==='sol-metodo-desembolso'){
     document.getElementById('sol-metodo-detalle').innerHTML = renderSolMetodoDetalle(e.target.value);
@@ -2962,6 +3235,85 @@ function mensajeDeLogin(error){
   return (error && error.message) ? error.message : 'No se pudo entrar.';
 }
 
+/* navigator.clipboard falla sin https y en algunos navegadores de celular.
+   Si no se puede copiar solo, se muestra el texto para copiarlo a mano: es
+   preferible a un boton que no hace nada. */
+async function copiarAlPortapapeles(texto, mensajeOk){
+  try{
+    await navigator.clipboard.writeText(texto);
+    toast(mensajeOk);
+  }catch(e){
+    STATE.modal = {type:'texto-copiar', texto};
+    render();
+  }
+}
+
+/* -------- formulario de accesos (administrador) -------- */
+document.addEventListener('submit', async function(e){
+  if(e.target.id !== 'form-acceso') return;
+  e.preventDefault();
+  const rol = document.getElementById('acc-rol').value;
+  const correo = document.getElementById('acc-correo').value.trim().toLowerCase();
+  const nombre = document.getElementById('acc-nombre').value;
+  const socioId = Number(document.getElementById('acc-socio').value);
+
+  const yaEsta = accesoPorCorreo(correo);
+  if(yaEsta && yaEsta.tienePerfil){
+    toast('Ese correo ya tiene cuenta y entra. Si querés cambiarle el socio, quitalo primero.');
+    return;
+  }
+  if(rol === 'socio' && ACCESOS.some(a => a.socioId === socioId && a.correo.toLowerCase() !== correo)){
+    toast('Ese socio ya tiene un acceso asignado. Cada socio lleva una sola cuenta.');
+    return;
+  }
+  await guardarAcceso({correo, nombre, rol, socioId});
+});
+
+/* -------- registro: el socio elige su contraseña -------- */
+document.addEventListener('submit', async function(e){
+  if(e.target.id !== 'form-registro') return;
+  e.preventDefault();
+  avisoLogin('');
+  const correo = document.getElementById('correo').value.trim().toLowerCase();
+  const codigo = document.getElementById('codigo').value.trim().toUpperCase();
+  const clave  = document.getElementById('clave').value;
+  const clave2 = document.getElementById('clave2').value;
+
+  if(clave !== clave2){ avisoLogin('Las dos contraseñas no son iguales.'); return; }
+  if(clave.length < 8){ avisoLogin('La contraseña necesita al menos 8 caracteres.'); return; }
+
+  const btn = document.getElementById('btn-registrar');
+  btn.disabled = true; btn.textContent = 'Creando...';
+
+  // El codigo viaja como metadato. Quien lo comprueba es Postgres.
+  const { data, error } = await sb.auth.signUp({
+    email: correo, password: clave, options: { data: { codigo } }
+  });
+  btn.disabled = false; btn.textContent = 'Crear mi contraseña';
+
+  if(error){ avisoLogin(mensajeDeRegistro(error)); return; }
+
+  if(!data.session){
+    // Supabase quedo pidiendo confirmacion por correo.
+    avisoLogin('Cuenta creada. Revisá tu correo para confirmarla y después entrá.');
+    STATE.pantallaEntrada = 'login';
+    render();
+    return;
+  }
+  await entrar(data.session);
+});
+
+function mensajeDeRegistro(error){
+  const m = (error && error.message ? error.message : String(error)).toLowerCase();
+  if(m.includes('already registered') || m.includes('already been registered'))
+    return 'Ese correo ya tiene una cuenta. Entrá con tu contraseña, o pedile al administrador que te vincule.';
+  if(m.includes('password')) return 'La contraseña es muy corta o muy simple. Probá con una más larga.';
+  if(m.includes('failed to fetch')) return 'Sin conexión. Revisá tu internet.';
+  if(m.includes('rate limit') || m.includes('too many'))
+    return 'Demasiados intentos seguidos. Esperá unos minutos y volvé a probar.';
+  return (error && error.message) ? error.message : 'No se pudo crear la cuenta.';
+}
+
 /* El formulario se dibuja y se borra en cada render, asi que el envio se
    escucha en el documento en vez de en el formulario. */
 document.addEventListener('submit', async function(e){
@@ -2991,7 +3343,7 @@ async function entrar(sesion){
     await sb.auth.signOut();
     STATE.sesion = null;
     render();
-    avisoLogin('Tu cuenta todavía no está habilitada. Pedile al administrador que te asigne un rol.');
+    avisoLogin('Tu cuenta existe pero todavía no ve nada. Suele ser que el código de registro no coincidió. Pedile al administrador que te vincule o que te dé un código nuevo.');
     return;
   }
 
@@ -3003,6 +3355,7 @@ async function entrar(sesion){
   }
 
   STATE.role = perfil.rol === 'administrador' ? 'admin' : 'socio';
+  if(STATE.role === 'admin') await cargarAccesos();
   const socio = SEED.socios.find(x => x.id === perfil.socio_id);
   STATE.socioActivo = socio ? socio.nombre : null;
 
@@ -3021,6 +3374,9 @@ async function entrar(sesion){
       'Falta configurar la conexión con Supabase en <code>config.js</code>.</div>';
     return;
   }
+  // El enlace que recibe el socio trae ?registro: cae directo en la pantalla
+  // de crear contraseña, sin tener que buscarla.
+  if(location.search.includes('registro')) STATE.pantallaEntrada = 'registro';
   render();   // pinta el login mientras se revisa si hay sesion guardada
   const { data } = await sb.auth.getSession();
   if(data.session) await entrar(data.session);
