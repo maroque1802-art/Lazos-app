@@ -444,13 +444,17 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '1.7';
+const APP_VERSION = '1.8';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
 /* Vitácora de cambios hechos por fuera del flujo normal. Solo la ve el
    administrador, y nadie la puede editar: la escriben triggers en Postgres. */
 const BITACORA = [];
+/* Cargos por atraso: suben el saldo del préstamo, no son dinero recibido. */
+const MORAS = [];
+/* Plata movida entre caja y bancos. No cambia el disponible total. */
+const TRASPASOS = [];
 const RECIBOS = [];
 const CIERRES = [];
 /* Denominaciones de colon costarricense en circulacion, de mayor a menor. */
@@ -600,6 +604,28 @@ function filaARecibo(r){
   };
 }
 
+function filaAMora(r){
+  return {
+    id: r.id, numero: r.numero, prestamoId: r.prestamo_numero,
+    fecha: isoADmy(r.fecha), meses: r.meses_cobrados,
+    saldoBase: Number(r.saldo_base), tasa: Number(r.tasa_mensual),
+    monto: Number(r.monto),
+    vencimientoAnterior: isoADmy(r.vencimiento_anterior),
+    vencimientoNuevo: isoADmy(r.vencimiento_nuevo),
+    aplicadoPor: r.aplicado_por, nota: r.nota || '',
+    anulado: !!r.anulado, anuladoEn: isoADmy(r.anulado_en),
+    motivoAnulacion: r.motivo_anulacion || ''
+  };
+}
+
+function filaATraspaso(r){
+  return {
+    id: r.id, numero: r.numero, fecha: isoADmy(r.fecha),
+    desde: r.desde, hacia: r.hacia, monto: Number(r.monto),
+    motivo: r.motivo || '', hechoPor: r.hecho_por
+  };
+}
+
 function filaACierre(r){
   return {
     numero: r.numero,
@@ -646,7 +672,7 @@ function filaASolicitud(r, nombrePorSocioId){
    costo es minimo, y evita que la pantalla muestre algo distinto de lo
    que quedo guardado. */
 async function cargarTodo(){
-  const [socios, prestamos, abonos, movs, recibos, cierres, sols, cfg] = await Promise.all([
+  const [socios, prestamos, abonos, movs, recibos, cierres, sols, cfg, moras, traspasos] = await Promise.all([
     sb.from('socios').select('id, nombre, capital_inicial').order('nombre'),
     sb.from('prestamos').select('*'),
     sb.from('abonos').select('*'),
@@ -654,8 +680,17 @@ async function cargarTodo(){
     sb.from('recibos').select('*').order('numero'),
     sb.from('cierres').select('*').order('numero'),
     sb.from('solicitudes').select('*').order('orden'),
-    sb.from('config').select('*').maybeSingle()
+    sb.from('config').select('*').maybeSingle(),
+    sb.from('cargos_mora').select('*').order('numero'),
+    sb.from('traspasos').select('*').order('numero')
   ]);
+
+  // Sin la migración 0008 estas dos tablas no existen; que falten no debe
+  // tumbar la carga entera.
+  MORAS.length = 0;
+  (moras && moras.data ? moras.data : []).forEach(r => MORAS.push(filaAMora(r)));
+  TRASPASOS.length = 0;
+  (traspasos && traspasos.data ? traspasos.data : []).forEach(r => TRASPASOS.push(filaATraspaso(r)));
 
   const error = [socios, prestamos, abonos, movs, recibos, cierres, sols, cfg]
     .map(r => r.error).find(Boolean);
@@ -703,6 +738,13 @@ async function cargarTodo(){
   const hoy = new Date();
   SEED.fechaCorte = `${String(hoy.getDate()).padStart(2,'0')}/${String(hoy.getMonth()+1).padStart(2,'0')}/${hoy.getFullYear()}`;
   if(!SEED.fechaInicial) SEED.fechaInicial = SEED.fechaCorte;
+
+  // Si nadie ha guardado cuánto del capital inicial estaba en efectivo, se usa
+  // el punto medio del rango posible. Va aquí y no solo al entrar: cargarTodo
+  // corre después de cada cambio, y sin esto el valor volvía a cero, lo que
+  // mandaba la bolsa de efectivo a negativo hasta el siguiente login.
+  // Es una estimación; el número de verdad se pone en Configuración.
+  CONFIG.saldoInicialEfectivo = CONFIG.saldoInicialEfectivo || calcularSaldoInicialEfectivoSugerido();
 }
 
 function socioIdPorNombre(nombre){
@@ -725,7 +767,7 @@ function nuevoCodigoRegistro(){
 /* Todo lo que la sesión trajo consigo, para soltarlo al salir. */
 function olvidarDatos(){
   [SEED.socios, SEED.prestamos, SEED.abonos, MOVS, RECIBOS, CIERRES,
-   SOLICITUDES, ACCESOS, BITACORA].forEach(a => { a.length = 0; });
+   SOLICITUDES, ACCESOS, BITACORA, MORAS, TRASPASOS].forEach(a => { a.length = 0; });
 }
 
 async function cargarBitacora(){
@@ -859,8 +901,17 @@ function totalAPagar(p){ return p.monto + p.intereses; }
 function totalAbonadoConfirmado(id){ return movimientosAprobados(id).reduce((s,m)=>s+m.monto,0); }
 function totalRebajasConfirmadas(id){ return movimientosAprobados(id).reduce((s,m)=>s+(m.rebajaAplicada||0),0); }
 function totalAbonadoPendiente(id){ return movimientosPendientes(id).reduce((s,m)=>s+m.monto,0); }
+/* La mora SUMA al saldo: es interés por atraso que el cliente debe, no un
+   pago. Se anulan las que el administrador haya anulado. */
+function totalMoraAplicada(prestamoId){
+  return MORAS
+    .filter(m => m.prestamoId === prestamoId && !m.anulado)
+    .reduce((s,m) => s + m.monto, 0);
+}
+
 function saldoConfirmado(p){
-  const s = totalAPagar(p) - totalAbonadoConfirmado(p.id) - totalRebajasConfirmadas(p.id);
+  const s = totalAPagar(p) - totalAbonadoConfirmado(p.id) - totalRebajasConfirmadas(p.id)
+          + totalMoraAplicada(p.id);
   return Math.max(0, Math.round(s));
 }
 function calcEstado(p){
@@ -881,6 +932,44 @@ function diasEspera(m){
    El peso de 1 colón es para no pelear con el redondeo. */
 function cancelaAnticipado(p, monto, rebaja, suger){
   return suger.aplica && monto >= (saldoConfirmado(p) - rebaja - 1);
+}
+
+/* Cuánta mora le toca a un préstamo vencido hoy.
+   6% por cada mes cumplido de atraso, sobre el saldo que tiene AHORA (no
+   sobre el que tenía al vencer): si el cliente abonó algo, el cobro baja.
+   Cada mes se cobra una sola vez, porque al aplicar la mora el vencimiento
+   se corre hacia adelante los mismos meses que se cobraron. */
+function calcMora(p, hoyStr){
+  const hoy = parseDMY(hoyStr || SEED.fechaCorte);
+  const venc = parseDMY(p.vencimiento);
+  const saldo = saldoConfirmado(p);
+  const vacio = {meses:0, saldo, tasa:CONFIG.tasaMensual, monto:0, aplica:false,
+                 diasAtraso:0, vencimientoNuevo:p.vencimiento};
+
+  if(hoy <= venc || saldo <= 0) return vacio;
+
+  // Meses CUMPLIDOS de atraso: a los 20 días todavía no se cobra un mes.
+  let meses = 0;
+  while(addMonthsSameDay(venc, meses + 1) <= hoy) meses++;
+  if(meses < 1) return {...vacio, diasAtraso: daysBetween(venc, hoy)};
+
+  let monto = saldo * (CONFIG.tasaMensual / 100) * meses;
+  if(CONFIG.redondeoActivo) monto = roundToMultiple(monto, CONFIG.redondeoMultiplo);
+
+  return {
+    meses, saldo, tasa: CONFIG.tasaMensual, monto: Math.round(monto), aplica: true,
+    diasAtraso: daysBetween(venc, hoy),
+    vencimientoNuevo: formatDMY(addMonthsSameDay(venc, meses))
+  };
+}
+
+/* Los vencidos que todavía no tienen cobrada la mora de este mes. */
+function prestamosConMoraPendiente(){
+  return SEED.prestamos
+    .filter(p => calcEstado(p) === 'Vencido')
+    .map(p => ({p, mora: calcMora(p, SEED.fechaCorte)}))
+    .filter(x => x.mora.aplica)
+    .sort((a,b) => b.mora.monto - a.mora.monto);
 }
 
 function calcCancelacionAnticipada(p, fechaPagoStr){
@@ -954,13 +1043,25 @@ function desembolsosPorBolsa(){
   });
   return {efectivo, bancos};
 }
+/* Lo que los traspasos le quitaron a una bolsa y le pusieron a la otra. El
+   total nunca cambia: la plata no aparece ni desaparece, solo se muda. */
+function traspasosPorBolsa(){
+  let efectivo = 0, bancos = 0;
+  TRASPASOS.forEach(t => {
+    if(t.desde === 'efectivo'){ efectivo -= t.monto; bancos += t.monto; }
+    else { bancos -= t.monto; efectivo += t.monto; }
+  });
+  return {efectivo, bancos};
+}
+
 function saldosDisponibles(){
   const ab = abonosConfirmadosPorBolsa();
   const des = desembolsosPorBolsa();
+  const tr = traspasosPorBolsa();
   const inicialEfectivo = CONFIG.saldoInicialEfectivo;
   const inicialBancos = capitalInicialTotal() - inicialEfectivo;
-  const efectivo = inicialEfectivo + ab.efectivo - des.efectivo;
-  const bancos = inicialBancos + ab.bancos - des.bancos;
+  const efectivo = inicialEfectivo + ab.efectivo - des.efectivo + tr.efectivo;
+  const bancos = inicialBancos + ab.bancos - des.bancos + tr.bancos;
   return {efectivo, bancos, total: efectivo + bancos};
 }
 function disponiblePorMetodo(metodo){
@@ -1722,6 +1823,75 @@ async function registrarCierreCaja({recibos, otrosMovs, esperado, contado, desgl
     saldoEfectivo: saldos.efectivo, saldoBancos: saldos.bancos, saldoTotal: saldos.total
   };
 }
+/* ============ MORA Y TRASPASOS ============ */
+
+async function aplicarMora(prestamoId, {meses, monto, nota}){
+  const p = prestamoById(prestamoId);
+  if(!p) return;
+  const calc = calcMora(p, SEED.fechaCorte);
+  const mesesFinal = Math.max(1, Math.round(meses || calc.meses));
+  const montoFinal = Math.max(0, Math.round(monto));
+  const vencNuevo = formatDMY(addMonthsSameDay(parseDMY(p.vencimiento), mesesFinal));
+  let numero = '';
+
+  await conGuardado(async () => {
+    const { data: n, error: eNum } = await sb.rpc('siguiente_mora');
+    if(eNum) throw eNum;
+    numero = n;
+
+    const { error } = await sb.from('cargos_mora').insert({
+      numero: n,
+      prestamo_numero: p.id,
+      fecha: dmyAIso(SEED.fechaCorte),
+      meses_cobrados: mesesFinal,
+      saldo_base: calc.saldo,
+      tasa_mensual: CONFIG.tasaMensual,
+      monto: montoFinal,
+      vencimiento_anterior: dmyAIso(p.vencimiento),
+      vencimiento_nuevo: dmyAIso(vencNuevo),
+      aplicado_por: 'Administrador',
+      nota: nota || ''
+    });
+    if(error) throw error;
+
+    // El vencimiento se corre los mismos meses que se cobraron: el cliente
+    // pagó por ese tiempo, así que deja de estar vencido por ellos.
+    const { error: e2 } = await sb.from('prestamos')
+      .update({ fecha_vencimiento: dmyAIso(vencNuevo) }).eq('numero', p.id);
+    if(e2) throw e2;
+  }, () => `Mora ${numero} aplicada. Nuevo vencimiento: ${vencNuevo}.`);
+}
+
+async function anularMora(numero, motivo){
+  await conGuardado(async () => {
+    const m = MORAS.find(x => x.numero === numero);
+    if(!m) throw new Error('No se encontró ese cargo.');
+    const { error } = await sb.from('cargos_mora').update({
+      anulado: true, anulado_en: dmyAIso(SEED.fechaCorte), motivo_anulacion: motivo
+    }).eq('numero', numero);
+    if(error) throw error;
+    // Se devuelve el vencimiento a donde estaba antes de este cargo.
+    const { error: e2 } = await sb.from('prestamos')
+      .update({ fecha_vencimiento: dmyAIso(m.vencimientoAnterior) }).eq('numero', m.prestamoId);
+    if(e2) throw e2;
+  }, 'Cargo anulado. El vencimiento volvió a donde estaba.');
+}
+
+async function registrarTraspaso({desde, hacia, monto, motivo}){
+  let numero = '';
+  await conGuardado(async () => {
+    const { data: n, error: eNum } = await sb.rpc('siguiente_traspaso');
+    if(eNum) throw eNum;
+    numero = n;
+    const { error } = await sb.from('traspasos').insert({
+      numero: n, fecha: dmyAIso(SEED.fechaCorte),
+      desde, hacia, monto: Math.round(monto),
+      motivo: motivo || '', hecho_por: 'Administrador'
+    });
+    if(error) throw error;
+  }, () => `Traspaso ${numero} registrado.`);
+}
+
 async function reversarAbono(movId, motivo){
   const original = movPorId(movId);
   if(!original) return;
@@ -1893,7 +2063,7 @@ function renderHeader(){
 
 const ADMIN_TABS = [
   ['tablero','Tablero'], ['aprobar','Por aprobar'], ['registrarSocio','Registrar a nombre de socio'],
-  ['cierreCaja','Cierre de caja'], ['solicitudes','Solicitudes de préstamo'], ['tablas','Tablas'], ['accesos','Accesos'], ['config','Configuración']
+  ['cierreCaja','Cierre de caja'], ['solicitudes','Solicitudes de préstamo'], ['tablas','Tablas'], ['vencidos','Vencidos'], ['accesos','Accesos'], ['config','Configuración']
 ];
 const SOCIO_TABS = [ ['cartera','Mi cartera'], ['registrar','Registrar abono'], ['solicitar','Solicitar préstamo'] ];
 
@@ -1911,7 +2081,7 @@ function renderBottomNav(){
   </div>`;
 }
 function renderBottomNavAdmin(){
-  const icons = {tablero:'📊', aprobar:'✅', registrarSocio:'➕', cierreCaja:'💰', solicitudes:'📥', tablas:'📑', accesos:'👤', config:'⚙️'};
+  const icons = {tablero:'📊', aprobar:'✅', registrarSocio:'➕', cierreCaja:'💰', solicitudes:'📥', tablas:'📑', vencidos:'⏰', accesos:'👤', config:'⚙️'};
   return `<div class="bottom-nav no-print">
     ${ADMIN_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}" data-action="goto" data-screen="${id}"><span class="ic">${icons[id]}</span></button>`).join('')}
   </div>`;
@@ -1927,9 +2097,10 @@ function renderScreen(){
     if(STATE.screen==='tablero') return renderTablero();
     if(STATE.screen==='aprobar') return renderPorAprobar();
     if(STATE.screen==='registrarSocio') return renderRegistrarAbono(true);
-    if(STATE.screen==='cierreCaja') return renderCierreCaja();
+    if(STATE.screen==='cierreCaja') return renderCierreCaja() + renderTraspasos();
     if(STATE.screen==='solicitudes') return renderSolicitudesAdmin();
     if(STATE.screen==='tablas') return renderTablas();
+    if(STATE.screen==='vencidos') return renderVencidos();
     if(STATE.screen==='accesos') return renderAccesos();
     if(STATE.screen==='config') return renderConfig();
     if(STATE.screen==='detalle') return renderDetalle(STATE.screenParams.id, true);
@@ -2756,6 +2927,134 @@ function renderTablaResumen(){
 }
 
 /* ---------- ADMIN: Configuración ---------- */
+/* ---------- ADMIN: mover plata entre caja y bancos ---------- */
+function renderTraspasos(){
+  const s = saldosDisponibles();
+  const ultimos = TRASPASOS.slice().sort((a,b)=>b.numero.localeCompare(a.numero)).slice(0,8);
+  return `
+  <div class="card">
+    <h3>Mover dinero entre caja y bancos</h3>
+    <p class="muted">Cuando depositás el efectivo o sacás plata del banco, la plata no cambia de dueño, solo de lugar. Anotalo aquí para que el disponible por bolsa diga la verdad.</p>
+    <div class="kv"><span class="k">En efectivo (caja)</span><span class="v">${formatMoney(s.efectivo)}</span></div>
+    <div class="kv"><span class="k">En bancos</span><span class="v">${formatMoney(s.bancos)}</span></div>
+    <div class="kv"><span class="k">Disponible total</span><span class="v">${formatMoney(s.total)}</span></div>
+    <form data-form="traspaso" style="margin-top:12px;">
+      <div class="grid cols-2">
+        <div class="field">
+          <label>Sale de</label>
+          <select name="desde" id="traspaso-desde">
+            <option value="efectivo">Efectivo (caja)</option>
+            <option value="bancos">Bancos</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Entra a</label>
+          <input type="text" id="traspaso-hacia" value="Bancos" disabled>
+          <span class="hint">Se llena solo: es la otra bolsa.</span>
+        </div>
+      </div>
+      <div class="field">
+        <label>Monto</label>
+        <input type="text" inputmode="numeric" class="money-input" name="monto" required placeholder="₡0">
+        <span class="hint">No puede ser más de lo que hay en la bolsa de donde sale.</span>
+      </div>
+      <div class="field">
+        <label>Motivo</label>
+        <input type="text" name="motivo" required placeholder="Ej: depósito del efectivo del día">
+      </div>
+      <button type="submit" class="btn btn-primary btn-block">Registrar el movimiento</button>
+    </form>
+    ${ultimos.length ? `
+      <h4 style="margin:16px 0 6px;">Últimos movimientos</h4>
+      <div class="table-wrap"><table>
+        <thead><tr><th>N°</th><th>Fecha</th><th>De</th><th>A</th><th>Monto</th><th>Motivo</th></tr></thead>
+        <tbody>${ultimos.map(t=>`<tr>
+          <td>${t.numero}</td><td>${t.fecha}</td>
+          <td>${t.desde==='efectivo'?'Caja':'Bancos'}</td>
+          <td>${t.hacia==='efectivo'?'Caja':'Bancos'}</td>
+          <td>${formatMoney(t.monto)}</td><td>${t.motivo}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : ''}
+  </div>`;
+}
+
+/* ---------- ADMIN: Vencidos y mora ---------- */
+function renderVencidos(){
+  const pendientes = prestamosConMoraPendiente();
+  const vencidos = SEED.prestamos.filter(p=>calcEstado(p)==='Vencido');
+  const totalSugerido = pendientes.reduce((a,x)=>a+x.mora.monto, 0);
+  const aplicadas = MORAS.slice().sort((a,b)=>b.numero.localeCompare(a.numero));
+
+  const tarjetas = pendientes.map(({p, mora}) => `
+    <div class="mov-item rechazado">
+      <div class="mov-top">
+        <span>${p.cliente} · N° ${p.id}</span>
+        <span class="pill pill-vencido">${mora.diasAtraso} días de atraso</span>
+      </div>
+      <div class="mov-meta">Socio: ${p.socio} · Venció el ${p.vencimiento}</div>
+      <div class="kv"><span class="k">Saldo actual</span><span class="v">${formatMoney(mora.saldo)}</span></div>
+      <div class="kv"><span class="k">${mora.meses} mes${mora.meses===1?'':'es'} cumplido${mora.meses===1?'':'s'} × ${mora.tasa}%</span><span class="v">${formatMoney(mora.monto)}</span></div>
+      <div class="grid cols-2" style="margin-top:8px;">
+        <div class="field">
+          <label>Meses a cobrar</label>
+          <input type="number" min="1" class="mora-meses" data-prestamo="${p.id}" data-saldo="${mora.saldo}" value="${mora.meses}">
+        </div>
+        <div class="field">
+          <label>Monto de la mora</label>
+          <input type="text" inputmode="numeric" class="mora-monto money-input" data-prestamo="${p.id}" value="${moneyInputValue(mora.monto)}">
+          <span class="hint">Podés bajarlo o ponerlo en cero si decidís no cobrar todo.</span>
+        </div>
+      </div>
+      <div class="field">
+        <label>Nota (opcional)</label>
+        <input type="text" class="mora-nota" data-prestamo="${p.id}" placeholder="Ej: habló y pidió prórroga">
+      </div>
+      <div class="notice" style="font-size:12.5px;">Al aplicarla, el vencimiento pasa del ${p.vencimiento} al <b class="mora-venc" data-prestamo="${p.id}">${mora.vencimientoNuevo}</b> y el préstamo deja de estar vencido.</div>
+      <div class="no-print" style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-primary btn-sm" data-action="aplicar-mora" data-prestamo="${p.id}">Aplicar mora</button>
+        <button class="btn btn-ghost btn-sm" data-action="goto" data-screen="detalle" data-id="${p.id}">Ver préstamo</button>
+      </div>
+    </div>`).join('');
+
+  return `
+  <div class="card">
+    <h2>Préstamos vencidos</h2>
+    ${vencidos.length===0
+      ? '<div class="empty">Ningún préstamo vencido. 🎉</div>'
+      : `<div class="notice warn">
+           <b>${vencidos.length} préstamo${vencidos.length===1?'':'s'} vencido${vencidos.length===1?'':'s'}.</b>
+           ${pendientes.length
+             ? ` ${pendientes.length} con al menos un mes cumplido de atraso: ${formatMoney(totalSugerido)} de mora por cobrar si la aplicás toda.`
+             : ' Ninguno cumple todavía un mes completo de atraso, así que no hay mora que cobrar.'}
+         </div>`}
+    <p class="muted">La mora no se cobra sola. Vos decidís préstamo por préstamo si la aplicás, por cuántos meses y por cuánto.</p>
+    ${tarjetas}
+    ${vencidos.length && !pendientes.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>N°</th><th>Cliente</th><th>Socio</th><th>Venció</th><th>Saldo</th></tr></thead>
+      <tbody>${vencidos.map(p=>`<tr><td>${p.id}</td><td>${p.cliente}</td><td>${p.socio}</td><td>${p.vencimiento}</td><td>${formatMoney(saldoConfirmado(p))}</td></tr>`).join('')}</tbody>
+    </table></div>` : ''}
+  </div>
+
+  <div class="card">
+    <h3>Moras aplicadas (${aplicadas.length})</h3>
+    ${aplicadas.length===0 ? '<div class="empty">Todavía no se ha cobrado ninguna mora.</div>' : `
+      <div class="table-wrap"><table>
+        <thead><tr><th>N°</th><th>Fecha</th><th>Préstamo</th><th>Meses</th><th>Saldo base</th><th>Monto</th><th>Vencimiento</th><th>Estado</th><th></th></tr></thead>
+        <tbody>${aplicadas.map(m=>{
+          const p = prestamoById(m.prestamoId);
+          return `<tr${m.anulado?' class="fila-anulada"':''}>
+            <td>${m.numero}</td><td>${m.fecha}</td>
+            <td>${m.prestamoId}${p?' · '+p.cliente:''}</td>
+            <td>${m.meses}</td><td>${formatMoney(m.saldoBase)}</td><td>${formatMoney(m.monto)}</td>
+            <td>${m.vencimientoAnterior} → ${m.vencimientoNuevo}</td>
+            <td>${m.anulado?`<span class="pill pill-rechazado">Anulada</span>`:'<span class="pill pill-cancelado">Aplicada</span>'}</td>
+            <td>${m.anulado?`<span class="muted">${m.motivoAnulacion}</span>`:`<button class="btn btn-ghost btn-sm no-print" data-action="anular-mora" data-numero="${m.numero}">Anular</button>`}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table></div>`}
+  </div>`;
+}
+
 /* ---------- ADMIN: Accesos ---------- */
 function estadoDelAcceso(a){
   if(a.tienePerfil)  return {texto:'Ya entra', clase:'pill-cancelado'};
@@ -3074,6 +3373,24 @@ document.addEventListener('click', async function(e){
   if(action==='pdf-cierre'){ abrirPdfCierre(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-reversa'){ abrirPdfReversa(t.dataset.mov); return; }
   if(action==='ver-recibos-cierre'){ STATE.modal = {type:'recibos-cierre', numero:t.dataset.numero}; render(); return; }
+  if(action==='aplicar-mora'){
+    const id = t.dataset.prestamo;
+    const meses = Number((document.querySelector(`.mora-meses[data-prestamo="${id}"]`)||{}).value) || 1;
+    const monto = parseMoneyInputValue((document.querySelector(`.mora-monto[data-prestamo="${id}"]`)||{}).value);
+    const nota = ((document.querySelector(`.mora-nota[data-prestamo="${id}"]`)||{}).value || '').trim();
+    const p = prestamoById(id);
+    if(!p) return;
+    const venc = formatDMY(addMonthsSameDay(parseDMY(p.vencimiento), Math.max(1, meses)));
+    if(!confirm(`Vas a cobrarle ${formatMoney(monto)} de mora a ${p.cliente} por ${meses} mes(es).\nEl vencimiento pasa del ${p.vencimiento} al ${venc}.`)) return;
+    await aplicarMora(id, {meses, monto, nota});
+    return;
+  }
+  if(action==='anular-mora'){
+    const motivo = prompt('¿Por qué se anula este cargo por mora?');
+    if(!motivo || !motivo.trim()) return;
+    await anularMora(t.dataset.numero, motivo.trim());
+    return;
+  }
   if(action==='corregir-abono'){
     const m = movPorId(t.dataset.mov);
     if(!m) return;
@@ -3295,6 +3612,11 @@ document.addEventListener('change', function(e){
     return;
   }
 
+  if(e.target.id==='traspaso-desde'){
+    const otra = document.getElementById('traspaso-hacia');
+    if(otra) otra.value = e.target.value === 'efectivo' ? 'Bancos' : 'Efectivo (caja)';
+    return;
+  }
   if(e.target.id==='acc-rol'){
     // Un administrador no se ata a una cartera: ve todas.
     const wrap = document.getElementById('acc-socio-wrap');
@@ -3512,6 +3834,20 @@ document.addEventListener('input', function(e){
     actualizarTotalesCaja();
     return;
   }
+  if(e.target.classList.contains('mora-meses')){
+    // El monto y el nuevo vencimiento siguen a los meses que se decidan cobrar.
+    const id = e.target.dataset.prestamo;
+    const meses = Math.max(1, Number(e.target.value) || 1);
+    const saldo = Number(e.target.dataset.saldo) || 0;
+    let monto = saldo * (CONFIG.tasaMensual/100) * meses;
+    if(CONFIG.redondeoActivo) monto = roundToMultiple(monto, CONFIG.redondeoMultiplo);
+    const inp = document.querySelector(`.mora-monto[data-prestamo="${id}"]`);
+    if(inp) inp.value = moneyInputValue(Math.round(monto));
+    const p = prestamoById(id);
+    const et = document.querySelector(`.mora-venc[data-prestamo="${id}"]`);
+    if(p && et) et.textContent = formatDMY(addMonthsSameDay(parseDMY(p.vencimiento), meses));
+    return;
+  }
   if(e.target.classList.contains('caja-monto-input')) revisarRebajaCaja(e.target.dataset.mov);
   if(e.target.id==='caja-contado' || e.target.classList.contains('caja-monto-input')){
     actualizarTotalesCaja();
@@ -3536,6 +3872,25 @@ document.addEventListener('input', function(e){
 });
 
 document.addEventListener('submit', async function(e){
+  if(e.target.dataset.form==='traspaso'){
+    e.preventDefault();
+    const f = e.target;
+    const desde = f.desde.value;
+    const hacia = desde === 'efectivo' ? 'bancos' : 'efectivo';
+    const monto = parseMoneyInputValue(f.monto.value);
+    const motivo = f.motivo.value.trim();
+    if(!monto || monto <= 0){ toast('Escribe un monto válido.'); return; }
+    if(!motivo){ toast('Escribe para qué es el movimiento.'); return; }
+    // No se puede sacar de una bolsa más de lo que tiene: quedaría en
+    // negativo y el disponible dejaría de servir para decidir desembolsos.
+    const hay = saldosDisponibles()[desde];
+    if(monto > hay){
+      toast(`En ${desde === 'efectivo' ? 'caja' : 'bancos'} solo hay ${formatMoney(hay)}.`);
+      return;
+    }
+    await registrarTraspaso({desde, hacia, monto, motivo});
+    return;
+  }
   if(e.target.dataset.form==='registrar-abono'){
     e.preventDefault();
     const f = e.target;
@@ -3742,7 +4097,6 @@ async function entrar(sesion){
   // mas amplio manda, y desde ahi ve tambien su propia cartera.
   STATE.screen = STATE.role === 'admin' ? 'tablero' : 'cartera';
   STATE.screenParams = {};
-  CONFIG.saldoInicialEfectivo = CONFIG.saldoInicialEfectivo || calcularSaldoInicialEfectivoSugerido();
   render();
 }
 
