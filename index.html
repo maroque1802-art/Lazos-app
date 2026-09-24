@@ -444,7 +444,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '1.4';
+const APP_VERSION = '1.5';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -2105,6 +2105,7 @@ function renderRegistrarAbono(esAdmin){
         <label>Monto abonado</label>
         <input type="text" inputmode="numeric" class="money-input" name="monto" required placeholder="₡0">
       </div>
+      <div id="rebaja-preview"></div>
       <div class="field">
         <label>Método de pago</label>
         <div class="radio-group">
@@ -2124,7 +2125,6 @@ function renderRegistrarAbono(esAdmin){
         <div id="comprobante-preview"></div>
         <span class="hint">Puedes tomar la foto con la cámara o elegir una de la galería.</span>
       </div>
-      <div id="rebaja-preview"></div>
       <button type="submit" class="btn btn-primary btn-block">Registrar abono</button>
       <p class="muted" style="text-align:center; margin-top:8px;">Quedará marcado como "Pendiente" (o "Reportado, pendiente de caja" si es efectivo) hasta que el administrador lo confirme.</p>
     </form>
@@ -2343,6 +2343,13 @@ function renderSolicitudesAdmin(){
 function dmyToInputDate(dmy){
   const [d,m,y] = dmy.split('/');
   return `${y}-${m}-${d}`;
+}
+/* El camino de vuelta: lo que devuelve un <input type="date"> al formato que
+   usan los cálculos. */
+function inputDateToDmy(iso){
+  if(!iso) return '';
+  const [y,m,d] = iso.split('-');
+  return `${d}/${m}/${y}`;
 }
 
 /* ---------- ADMIN: Tablero ---------- */
@@ -3224,6 +3231,12 @@ document.addEventListener('click', async function(e){
 document.addEventListener('change', function(e){
   if(e.target.classList.contains('caja-check')){ actualizarTotalesCaja(); return; }
 
+  // La fecha real de pago cambia cuántos meses de interés se cobran.
+  if(e.target.name==='fecha' && e.target.closest('form[data-form="registrar-abono"]')){
+    actualizarAvisoRebaja(e.target.closest('form'));
+    return;
+  }
+
   if(e.target.id==='acc-rol'){
     // Un administrador no se ata a una cartera: ve todas.
     const wrap = document.getElementById('acc-socio-wrap');
@@ -3314,6 +3327,61 @@ function renderClienteSuggestions(form, query){
   list.hidden = false;
 }
 
+/* Le dice al socio, mientras teclea, qué va a pasar con ese monto: cuánto
+   queda debiendo, o que con ese pago el préstamo se cancela y por qué se le
+   rebajan intereses. Antes la rebaja se aplicaba por detrás y el socio veía
+   un total que no sabía de dónde salía. Es solo informativo: quien decide la
+   rebaja sigue siendo el administrador al aprobar o al cerrar la caja. */
+function actualizarAvisoRebaja(form){
+  if(!form) form = document.querySelector('form[data-form="registrar-abono"]');
+  const caja = form && form.querySelector('#rebaja-preview');
+  if(!caja) return;
+
+  const p = prestamoById((form.querySelector('#prestamoId-value')||{}).value);
+  if(!p){ caja.innerHTML = ''; return; }
+
+  const inpFecha = form.querySelector('input[name="fecha"]');
+  const fechaStr = (inpFecha && inpFecha.value)
+    ? inputDateToDmy(inpFecha.value)
+    : SEED.fechaCorte;
+  const sinFecha = !(inpFecha && inpFecha.value);
+
+  const inpMonto = form.querySelector('input[name="monto"]');
+  const monto = inpMonto ? parseMoneyInputValue(inpMonto.value) : 0;
+
+  const saldo = saldoConfirmado(p);
+  const suger = calcCancelacionAnticipada(p, fechaStr);
+  const paraCancelar = Math.max(0, saldo - Math.round(suger.rebajaSugerida));
+  const nota = sinFecha ? ` <span class="muted">(calculado para ${fechaStr}; cambia si pagó otro día)</span>` : '';
+
+  // Sin rebaja posible: igual conviene decir cuánto queda.
+  if(!suger.aplica){
+    caja.innerHTML = monto > 0
+      ? `<div class="notice">Saldo actual ${formatMoney(saldo)}. Con este abono le quedarían <b>${formatMoney(Math.max(0, saldo - monto))}</b>.${nota}</div>`
+      : `<div class="notice">Saldo actual de este préstamo: <b>${formatMoney(saldo)}</b>.${nota}</div>`;
+    return;
+  }
+
+  if(cancelaAnticipado(p, monto, suger.rebajaSugerida, suger)){
+    caja.innerHTML = `<div class="notice" style="background:var(--success-bg); color:var(--success);">
+      Con este monto el préstamo queda <b>cancelado</b>.
+      Se le rebajan <b>${formatMoney(suger.rebajaSugerida)}</b> de intereses por pagar antes del vencimiento
+      (saldo ${formatMoney(saldo)} − rebaja = ${formatMoney(paraCancelar)}).${nota}
+      <div style="margin-top:4px; font-size:12px;">La rebaja la confirma el administrador al aprobar el abono.</div>
+    </div>`;
+    return;
+  }
+
+  const falta = paraCancelar - monto;
+  caja.innerHTML = `<div class="notice">
+    Este cliente puede <b>cancelar</b> pagando <b>${formatMoney(paraCancelar)}</b>:
+    se le rebajarían ${formatMoney(suger.rebajaSugerida)} de intereses por pagar antes del vencimiento.${nota}
+    ${monto > 0
+      ? `<div style="margin-top:4px;">Con ${formatMoney(monto)} le faltarían ${formatMoney(falta)} para cancelar, y le quedarían <b>${formatMoney(Math.max(0, saldo - monto))}</b> de saldo sin rebaja.</div>`
+      : ''}
+  </div>`;
+}
+
 document.addEventListener('mousedown', function(e){
   const item = e.target.closest('.autocomplete-item');
   if(!item) return;
@@ -3327,6 +3395,7 @@ document.addEventListener('mousedown', function(e){
   if(hint) hint.textContent = `Seleccionado: N° ${p.id} · ${p.cliente} · saldo ${formatMoney(saldoConfirmado(p))}`;
   const list = form.querySelector('#cliente-suggestions');
   if(list) list.hidden = true;
+  actualizarAvisoRebaja(form);
 });
 
 document.addEventListener('focusin', function(e){
@@ -3377,6 +3446,10 @@ document.addEventListener('input', function(e){
   if(e.target.classList.contains('caja-monto-input')) revisarRebajaCaja(e.target.dataset.mov);
   if(e.target.id==='caja-contado' || e.target.classList.contains('caja-monto-input')){
     actualizarTotalesCaja();
+    return;
+  }
+  if(e.target.name==='monto' && e.target.closest('form[data-form="registrar-abono"]')){
+    actualizarAvisoRebaja(e.target.closest('form'));
     return;
   }
   if(e.target.id==='buscar-cliente'){
