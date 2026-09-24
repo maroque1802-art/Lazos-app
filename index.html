@@ -444,7 +444,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '1.5';
+const APP_VERSION = '1.6';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -3159,22 +3159,23 @@ document.addEventListener('click', async function(e){
     const otrosMovs = movsOtrosMetodosPendientesCierre();
     if(!pendientes.length && !otrosMovs.length){ toast('Marca al menos un abono como recibido.'); return; }
 
-    // Se confirman uno por uno y despues se recarga: los recibos se emiten
-    // con los saldos ya actualizados por todas las confirmaciones.
+    // Cada abono se confirma y se le emite SU recibo antes de pasar al
+    // siguiente. Si se confirmaran todos primero, al emitir el primer recibo
+    // el saldo ya habría bajado por los demás, y dos abonos del mismo cliente
+    // en el mismo cierre salían con el mismo saldo final y un saldo anterior
+    // que nunca existió. Así cada recibo ve el saldo justo después del suyo.
     const movIds = [];
+    const recibos = [];
     for(const pen of pendientes){
       const id = await confirmarCaja(pen.movId, pen.montoFinal, pen.motivo, pen.rebajaFinal);
-      if(id) movIds.push(id);
-    }
-    if(!movIds.length && !otrosMovs.length){ toast('No se pudo confirmar ningún abono.'); return; }
-
-    await cargarTodo();
-    const recibos = [];
-    for(const id of movIds){
+      if(!id) continue;
+      movIds.push(id);
+      await cargarTodo();
       const r = await generarRecibo(movPorId(id));
       if(r) recibos.push(r);
-      await cargarTodo();
     }
+    if(!movIds.length && !otrosMovs.length){ toast('No se pudo confirmar ningún abono.'); return; }
+    await cargarTodo();
 
     const esperado = recibos.reduce((a,r)=>a+r.monto,0);
     const cierre = await registrarCierreCaja({recibos, otrosMovs, esperado, contado, desglose, observaciones});
@@ -3349,7 +3350,16 @@ function actualizarAvisoRebaja(form){
   const inpMonto = form.querySelector('input[name="monto"]');
   const monto = inpMonto ? parseMoneyInputValue(inpMonto.value) : 0;
 
+  // Saldo flotante: lo que este cliente ya reportó hoy y todavía espera
+  // aprobación o cierre. Sin esto, quien registra un segundo abono del mismo
+  // cliente ve el saldo de antes del primero y cree que debe más de lo que
+  // debe. El saldo de verdad no cambia hasta que el administrador confirma.
   const saldo = saldoConfirmado(p);
+  const enVuelo = totalAbonadoPendiente(p.id);
+  const saldoFlotante = Math.max(0, saldo - enVuelo);
+  const avisoFlotante = enVuelo > 0
+    ? `<div style="margin-top:4px; font-size:12.5px;">Ya hay ${formatMoney(enVuelo)} reportado de este cliente sin confirmar todavía, así que el saldo en firme sería <b>${formatMoney(saldoFlotante)}</b>.</div>`
+    : '';
   const suger = calcCancelacionAnticipada(p, fechaStr);
   const paraCancelar = Math.max(0, saldo - Math.round(suger.rebajaSugerida));
   const nota = sinFecha ? ` <span class="muted">(calculado para ${fechaStr}; cambia si pagó otro día)</span>` : '';
@@ -3357,8 +3367,8 @@ function actualizarAvisoRebaja(form){
   // Sin rebaja posible: igual conviene decir cuánto queda.
   if(!suger.aplica){
     caja.innerHTML = monto > 0
-      ? `<div class="notice">Saldo actual ${formatMoney(saldo)}. Con este abono le quedarían <b>${formatMoney(Math.max(0, saldo - monto))}</b>.${nota}</div>`
-      : `<div class="notice">Saldo actual de este préstamo: <b>${formatMoney(saldo)}</b>.${nota}</div>`;
+      ? `<div class="notice">Saldo actual ${formatMoney(saldo)}. Con este abono le quedarían <b>${formatMoney(Math.max(0, saldoFlotante - monto))}</b>.${nota}${avisoFlotante}</div>`
+      : `<div class="notice">Saldo actual de este préstamo: <b>${formatMoney(saldo)}</b>.${nota}${avisoFlotante}</div>`;
     return;
   }
 
@@ -3368,6 +3378,7 @@ function actualizarAvisoRebaja(form){
       Se le rebajan <b>${formatMoney(suger.rebajaSugerida)}</b> de intereses por pagar antes del vencimiento
       (saldo ${formatMoney(saldo)} − rebaja = ${formatMoney(paraCancelar)}).${nota}
       <div style="margin-top:4px; font-size:12px;">La rebaja la confirma el administrador al aprobar el abono.</div>
+      ${avisoFlotante}
     </div>`;
     return;
   }
@@ -3377,8 +3388,9 @@ function actualizarAvisoRebaja(form){
     Este cliente puede <b>cancelar</b> pagando <b>${formatMoney(paraCancelar)}</b>:
     se le rebajarían ${formatMoney(suger.rebajaSugerida)} de intereses por pagar antes del vencimiento.${nota}
     ${monto > 0
-      ? `<div style="margin-top:4px;">Con ${formatMoney(monto)} le faltarían ${formatMoney(falta)} para cancelar, y le quedarían <b>${formatMoney(Math.max(0, saldo - monto))}</b> de saldo sin rebaja.</div>`
+      ? `<div style="margin-top:4px;">Con ${formatMoney(monto)} le faltarían ${formatMoney(falta)} para cancelar, y le quedarían <b>${formatMoney(Math.max(0, saldoFlotante - monto))}</b> de saldo sin rebaja.</div>`
       : ''}
+    ${avisoFlotante}
   </div>`;
 }
 
