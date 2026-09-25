@@ -215,6 +215,11 @@ main{padding:16px 0 40px;}
 .login-wrap .pie-legal{border-top:none; margin-top:26px;}
 .pie-version{opacity:.7;}
 
+/* ---------- Encabezados que ordenan ---------- */
+.th-orden{cursor:pointer; user-select:none; white-space:nowrap;}
+.th-orden:hover{color:var(--c-primary);}
+.th-orden.activa{color:var(--c-primary);}
+
 /* ---------- Vitácora ---------- */
 .bit-item{border-left:3px solid var(--border); padding:10px 13px; margin-bottom:9px; border-radius:0 8px 8px 0; background:var(--bg-alt);}
 .bit-top{display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;}
@@ -444,7 +449,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '1.9';
+const APP_VERSION = '2.0';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -479,7 +484,10 @@ const STATE = {
   historialHasta: '',
   modal: null,
   theme: null,
-  pantallaEntrada: 'login'   // 'login' | 'registro', antes de tener sesion
+  pantallaEntrada: 'login',  // 'login' | 'registro', antes de tener sesion
+  // Por qué columna está ordenada cada tabla: {prestamos:{col,dir}, ...}
+  orden: {},
+  recibosBusqueda: '', recibosDesde: '', recibosHasta: ''
 };
 
 
@@ -2783,6 +2791,61 @@ function renderCierreCaja(){
 
 /* ---------- ADMIN: Tablas ---------- */
 /* Lo que quedó anotado al tocar los datos por fuera de la aplicación. */
+/* ============ TABLAS ORDENABLES ============
+   Cada tabla declara sus columnas una sola vez: el título, cómo se saca el
+   valor que se ORDENA y cómo se pinta la CELDA. Son cosas distintas: la celda
+   de un monto lleva "₡35,000" y el orden necesita el número 35000; la de una
+   fecha lleva "24/09/2026" y el orden necesita la fecha de verdad, no ese
+   texto, que ordenado como letras pondría diciembre antes que febrero. */
+
+function ordenDe(tabla){
+  return (STATE.orden && STATE.orden[tabla]) || null;
+}
+
+function valorOrdenable(col, fila){
+  const v = col.val ? col.val(fila) : fila[col.k];
+  if(col.tipo === 'fecha') return v ? parseDMY(v).getTime() : -Infinity;
+  if(col.tipo === 'num')   return Number(v) || 0;
+  return String(v == null ? '' : v).toLowerCase();
+}
+
+function ordenarFilas(filas, columnas, tabla){
+  const o = ordenDe(tabla);
+  if(!o) return filas;
+  const col = columnas.find(c => c.k === o.col);
+  if(!col) return filas;
+  const signo = o.dir === 'asc' ? 1 : -1;
+  // Copia: ordenar en su lugar cambiaría el arreglo de datos de la aplicación.
+  return filas.slice().sort((a,b) => {
+    const va = valorOrdenable(col, a), vb = valorOrdenable(col, b);
+    if(va < vb) return -1 * signo;
+    if(va > vb) return  1 * signo;
+    return 0;
+  });
+}
+
+function renderTablaOrdenable(tabla, columnas, filas, opciones){
+  opciones = opciones || {};
+  const o = ordenDe(tabla);
+  const ordenadas = ordenarFilas(filas, columnas, tabla);
+
+  const encabezados = columnas.map(c => {
+    if(c.ordenable === false) return `<th>${c.t}</th>`;
+    const activa = o && o.col === c.k;
+    const flecha = activa ? (o.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    return `<th class="th-orden${activa ? ' activa' : ''}" data-action="ordenar" data-tabla="${tabla}" data-col="${c.k}" title="Tocá para ordenar por ${c.t}">${c.t}${flecha}</th>`;
+  }).join('');
+
+  const cuerpo = ordenadas.map(f => {
+    const attrs = opciones.filaAttrs ? opciones.filaAttrs(f) : '';
+    return `<tr ${attrs}>${columnas.map(c => `<td>${c.html ? c.html(f) : (f[c.k] == null ? '' : f[c.k])}</td>`).join('')}</tr>`;
+  }).join('');
+
+  return `<div class="table-wrap"><table>
+    <thead><tr>${encabezados}</tr></thead>
+    <tbody>${cuerpo}</tbody></table></div>`;
+}
+
 function renderTablaBitacora(){
   if(BITACORA.length===0) return `<div class="empty">
     Todavía no hay nada anotado. Aquí van a caer solos los cambios que hagas
@@ -2856,77 +2919,182 @@ function renderTablas(){
     ${sub==='prestamos'?renderTablaPrestamos():sub==='abonos'?renderTablaAbonos():sub==='recibos'?renderTablaRecibos():sub==='cierres'?renderTablaCierres():sub==='bitacora'?renderTablaBitacora():renderTablaResumen()}
   </div>`;
 }
+/* ¿Este recibo se puede reversar? Solo si su movimiento sigue en pie: uno ya
+   reversado, rechazado o que nunca se aprobó no tiene nada que deshacer. */
+function reciboReversable(r){
+  if(r.anulado) return false;
+  const m = movPorId(r.movId);
+  return !!m && m.tipo === 'abono' && esAprobado(m) && !m.reversadoPorId;
+}
+
+function recibosFiltrados(){
+  const q = (STATE.recibosBusqueda || '').trim().toLowerCase();
+  const desde = STATE.recibosDesde ? parseDMY(inputDateToDmy(STATE.recibosDesde)) : null;
+  const hasta = STATE.recibosHasta ? parseDMY(inputDateToDmy(STATE.recibosHasta)) : null;
+
+  return RECIBOS.filter(r => {
+    if(desde || hasta){
+      const f = parseDMY(r.fecha);
+      if(desde && f < desde) return false;
+      if(hasta && f > hasta) return false;
+    }
+    if(!q) return true;
+    // Se busca por todo lo que una persona recuerda de un recibo: el número,
+    // el cliente, el préstamo, el método, o el monto tal como lo ve escrito.
+    return [r.numero, r.cliente, r.prestamoId, r.metodo,
+            String(r.monto), formatMoney(r.monto), r.motivoAnulacion, r.anuladoPor]
+      .some(v => String(v || '').toLowerCase().includes(q));
+  });
+}
+
 function renderTablaRecibos(){
-  const recibos = RECIBOS.slice().sort((a,b)=>b.numero.localeCompare(a.numero));
-  if(recibos.length===0) return '<div class="empty">Todavía no se ha generado ningún recibo.</div>';
+  if(RECIBOS.length===0) return '<div class="empty">Todavía no se ha generado ningún recibo.</div>';
+
+  const filtros = `
+  <div class="grid cols-2" style="margin-bottom:6px;">
+    <div class="field" style="grid-column:1 / -1;">
+      <label for="recibos-buscar">Buscar</label>
+      <input type="text" id="recibos-buscar" placeholder="N° de recibo, cliente, préstamo, método o monto..." autocomplete="off" value="${STATE.recibosBusqueda||''}">
+    </div>
+    <div class="field"><label>Desde</label><input type="date" id="recibos-desde" value="${STATE.recibosDesde||''}"></div>
+    <div class="field"><label>Hasta</label><input type="date" id="recibos-hasta" value="${STATE.recibosHasta||''}"></div>
+  </div>`;
+
+  // Los filtros se dibujan aparte del cuerpo: al teclear solo se repinta la
+  // tabla, porque rehacer el formulario le quitaría el foco al campo.
+  return filtros + `<div id="tabla-recibos-cuerpo">${renderTablaRecibosCuerpo()}</div>`;
+}
+
+function renderTablaRecibosCuerpo(){
+  const recibos = recibosFiltrados().sort((a,b)=>b.numero.localeCompare(a.numero));
+  const hayFiltro = (STATE.recibosBusqueda||'').trim() || STATE.recibosDesde || STATE.recibosHasta;
+  if(recibos.length===0) return `<div class="empty">Ningún recibo con esos filtros.
+    <div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" data-action="limpiar-filtros-recibos">Quitar filtros</button></div></div>`;
   /* Los anulados no se borran: se conservan con su número y se muestran
      marcados. Borrarlos abriría un hueco en el consecutivo y borraría la
      evidencia de que ese recibo llegó a existir. */
-  const anulados = recibos.filter(r=>r.anulado).length;
-  const rows = recibos.map(r=>`<tr${r.anulado?' class="fila-anulada"':''}>
-    <td>${r.numero}${r.anulado?' <span class="pill pill-rechazado">Anulado</span>':''}</td>
-    <td>${r.fecha}</td><td>${r.cliente}</td><td>${r.prestamoId}</td>
-    <td>${formatMoney(r.monto)}</td><td>${r.metodo}</td><td>${formatMoney(r.saldoAnterior)}</td><td>${formatMoney(r.saldoNuevo)}</td>
-    <td>${r.anulado
+  const anulados = RECIBOS.filter(r=>r.anulado).length;
+  const cols = [
+    {k:'numero', t:'N°', html:r=>`${r.numero}${r.anulado?' <span class="pill pill-rechazado">Anulado</span>':''}`},
+    {k:'fecha', t:'Fecha', tipo:'fecha'},
+    {k:'cliente', t:'Cliente'},
+    {k:'prestamoId', t:'Préstamo'},
+    {k:'monto', t:'Monto', tipo:'num', html:r=>formatMoney(r.monto)},
+    {k:'metodo', t:'Método'},
+    {k:'saldoAnterior', t:'Saldo anterior', tipo:'num', html:r=>formatMoney(r.saldoAnterior)},
+    {k:'saldoNuevo', t:'Saldo nuevo', tipo:'num', html:r=>formatMoney(r.saldoNuevo)},
+    {k:'anulado', t:'Estado', html:r=>r.anulado
       ? `<span class="muted">${r.anuladoPor?'Nota '+r.anuladoPor+' · ':''}${r.anuladoEn||''}${r.motivoAnulacion?' · '+r.motivoAnulacion:''}</span>`
-      : ''}</td>
-    <td><button class="btn btn-ghost btn-sm no-print" data-action="pdf-recibo" data-numero="${r.numero}" data-reimpresion="1">Reimprimir</button></td>
-  </tr>`).join('');
-  const aviso = anulados
-    ? `<p class="muted">Del más reciente al más antiguo. ${anulados} recibo${anulados===1?'':'s'} anulado${anulados===1?'':'s'}: se conserva${anulados===1?'':'n'} para dejar rastro, pero no vale${anulados===1?'':'n'} como comprobante.</p>`
-    : '<p class="muted">Del más reciente al más antiguo.</p>';
-  return `${aviso}<div class="table-wrap"><table>
-    <thead><tr><th>N°</th><th>Fecha</th><th>Cliente</th><th>Préstamo</th><th>Monto</th><th>Método</th><th>Saldo anterior</th><th>Saldo nuevo</th><th>Estado</th><th></th></tr></thead>
-    <tbody>${rows}</tbody></table></div>`;
+      : ''},
+    {k:'acciones', t:'', ordenable:false,
+     html:r=>`<span style="white-space:nowrap;">
+       <button class="btn btn-ghost btn-sm no-print" data-action="pdf-recibo" data-numero="${r.numero}" data-reimpresion="1">Reimprimir</button>
+       ${reciboReversable(r) ? `<button class="btn btn-danger btn-sm no-print" data-action="abrir-reversa" data-mov="${r.movId}">Reversar</button>` : ''}
+     </span>`}
+  ];
+  const cuenta = hayFiltro
+    ? `${recibos.length} de ${RECIBOS.length} recibos · <a href="#" data-action="limpiar-filtros-recibos">quitar filtros</a>`
+    : `${RECIBOS.length} recibo${RECIBOS.length===1?'':'s'}`;
+  const aviso = `<p class="muted">${cuenta}. Tocá el título de una columna para ordenar.${
+    anulados ? ` ${anulados} anulado${anulados===1?'':'s'}: se conserva${anulados===1?'':'n'} para dejar rastro, pero no vale${anulados===1?'':'n'} como comprobante.` : ''}</p>`;
+
+  return aviso + renderTablaOrdenable('recibos', cols, recibos, {
+    filaAttrs: r => r.anulado ? 'class="fila-anulada"' : ''
+  });
 }
 function renderTablaCierres(){
   const cierres = CIERRES.slice().sort((a,b)=>b.numero.localeCompare(a.numero));
   if(cierres.length===0) return '<div class="empty">Todavía no se ha hecho ningún cierre de caja.</div>';
-  const rows = cierres.map(ci=>{
-    const dif = ci.contado - ci.esperado;
-    return `<tr>
-      <td>${ci.numero}</td><td>${ci.fecha}</td>
-      <td>${(ci.detalle.length + ci.otros.length) || recibosDelCierre(ci.numero).length}</td>
-      <td>${formatMoney(ci.esperado)}</td><td>${formatMoney(ci.contado)}</td>
-      <td style="color:${dif===0?'var(--success)':'var(--danger)'}">${formatMoney(dif)}</td>
-      <td>${formatMoney(ci.totalOtros)}</td>
-      <td><b>${formatMoney(ci.totalGeneral)}</b></td>
-      <td>${formatMoney(ci.saldoEfectivo)}</td>
-      <td>${formatMoney(ci.saldoBancos)}</td>
-      <td>${ci.observaciones||''}</td>
-      <td style="white-space:nowrap;">
-        <button class="btn btn-ghost btn-sm no-print" data-action="pdf-cierre" data-numero="${ci.numero}" data-reimpresion="1">Reimprimir</button>
-        <button class="btn btn-ghost btn-sm no-print" data-action="ver-recibos-cierre" data-numero="${ci.numero}">Recibos</button>
-      </td>
-    </tr>`;
-  }).join('');
-  return `<p class="muted">Del más reciente al más antiguo. Un cierre por día, con todo el movimiento. “Recibos” abre los del cierre para volver a guardarlos.</p><div class="table-wrap"><table>
-    <thead><tr><th>N°</th><th>Fecha</th><th>Movs.</th><th>Efectivo esperado</th><th>Efectivo contado</th><th>Diferencia</th><th>Otros métodos</th><th>Total del día</th><th>Disp. efectivo</th><th>Disp. bancos</th><th>Observaciones</th><th></th></tr></thead>
-    <tbody>${rows}</tbody></table></div>`;
+  const filas = cierres.map(ci => ({
+    ci, numero: ci.numero, fecha: ci.fecha,
+    movs: (ci.detalle.length + ci.otros.length) || recibosDelCierre(ci.numero).length,
+    esperado: ci.esperado, contado: ci.contado,
+    diferencia: ci.contado - ci.esperado,
+    totalOtros: ci.totalOtros, totalGeneral: ci.totalGeneral,
+    saldoEfectivo: ci.saldoEfectivo, saldoBancos: ci.saldoBancos,
+    observaciones: ci.observaciones || ''
+  }));
+  const cols = [
+    {k:'numero', t:'N°'},
+    {k:'fecha', t:'Fecha', tipo:'fecha'},
+    {k:'movs', t:'Movs.', tipo:'num'},
+    {k:'esperado', t:'Efectivo esperado', tipo:'num', html:f=>formatMoney(f.esperado)},
+    {k:'contado', t:'Efectivo contado', tipo:'num', html:f=>formatMoney(f.contado)},
+    {k:'diferencia', t:'Diferencia', tipo:'num',
+     html:f=>`<span style="color:${f.diferencia===0?'var(--success)':'var(--danger)'}">${formatMoney(f.diferencia)}</span>`},
+    {k:'totalOtros', t:'Otros métodos', tipo:'num', html:f=>formatMoney(f.totalOtros)},
+    {k:'totalGeneral', t:'Total del día', tipo:'num', html:f=>`<b>${formatMoney(f.totalGeneral)}</b>`},
+    {k:'saldoEfectivo', t:'Disp. efectivo', tipo:'num', html:f=>formatMoney(f.saldoEfectivo)},
+    {k:'saldoBancos', t:'Disp. bancos', tipo:'num', html:f=>formatMoney(f.saldoBancos)},
+    {k:'observaciones', t:'Observaciones'},
+    {k:'acciones', t:'', ordenable:false, html:f=>`<span style="white-space:nowrap;">
+      <button class="btn btn-ghost btn-sm no-print" data-action="pdf-cierre" data-numero="${f.numero}" data-reimpresion="1">Reimprimir</button>
+      <button class="btn btn-ghost btn-sm no-print" data-action="ver-recibos-cierre" data-numero="${f.numero}">Recibos</button></span>`}
+  ];
+  return '<p class="muted">Tocá el título de una columna para ordenar. “Recibos” abre los de ese cierre para volver a guardarlos.</p>'
+    + renderTablaOrdenable('cierres', cols, filas);
 }
 function renderTablaPrestamos(){
-  const rows = SEED.prestamos.map(p=>{
-    const estado = calcEstado(p);
-    return `<tr style="cursor:pointer" data-action="goto" data-screen="detalle" data-id="${p.id}">
-      <td>${p.id}</td><td>${p.socio}</td><td>${p.cliente}</td><td>${p.fecha}</td>
-      <td>${formatMoney(p.monto)}</td><td>${p.plazo}</td><td>${formatMoney(p.intereses)}</td>
-      <td>${p.vencimiento}</td><td>${p.metodoDesembolso}</td><td>${formatMoney(totalAPagar(p))}</td>
-      <td>${formatMoney(totalAbonadoConfirmado(p.id))}</td><td>${formatMoney(totalRebajasConfirmadas(p.id))}</td>
-      <td>${formatMoney(saldoConfirmado(p))}</td><td>${pillEstado(estado)}</td><td>${p.obs||''}</td>
-    </tr>`;
-  }).join('');
-  return `<div class="table-wrap"><table>
-    <thead><tr><th>N°</th><th>Socio</th><th>Cliente</th><th>Fecha</th><th>Monto</th><th>Plazo</th><th>Intereses</th><th>Vencimiento</th><th>Método</th><th>Total a pagar</th><th>Total abonado</th><th>Rebajas</th><th>Saldo</th><th>Estado</th><th>Obs.</th></tr></thead>
-    <tbody>${rows}</tbody></table></div>`;
+  // Los totales se calculan una vez por préstamo y no en cada comparación del
+  // ordenamiento, que con 100 préstamos serían miles de recorridos de MOVS.
+  const filas = SEED.prestamos.map(p => ({
+    p,
+    id: p.id, socio: p.socio, cliente: p.cliente, fecha: p.fecha,
+    monto: p.monto, plazo: p.plazo, intereses: p.intereses,
+    vencimiento: p.vencimiento, metodo: p.metodoDesembolso,
+    total: totalAPagar(p),
+    abonado: totalAbonadoConfirmado(p.id),
+    rebajas: totalRebajasConfirmadas(p.id),
+    mora: totalMoraAplicada(p.id),
+    saldo: saldoConfirmado(p),
+    estado: calcEstado(p), obs: p.obs || ''
+  }));
+
+  const cols = [
+    {k:'id', t:'N°'},
+    {k:'socio', t:'Socio'},
+    {k:'cliente', t:'Cliente'},
+    {k:'fecha', t:'Fecha', tipo:'fecha'},
+    {k:'monto', t:'Monto', tipo:'num', html:f=>formatMoney(f.monto)},
+    {k:'plazo', t:'Plazo', tipo:'num'},
+    {k:'intereses', t:'Intereses', tipo:'num', html:f=>formatMoney(f.intereses)},
+    {k:'vencimiento', t:'Vencimiento', tipo:'fecha'},
+    {k:'metodo', t:'Método'},
+    {k:'total', t:'Total a pagar', tipo:'num', html:f=>formatMoney(f.total)},
+    {k:'abonado', t:'Total abonado', tipo:'num', html:f=>formatMoney(f.abonado)},
+    {k:'rebajas', t:'Rebajas', tipo:'num', html:f=>formatMoney(f.rebajas)},
+    {k:'mora', t:'Mora', tipo:'num', html:f=>f.mora?formatMoney(f.mora):'-'},
+    {k:'saldo', t:'Saldo', tipo:'num', html:f=>formatMoney(f.saldo)},
+    {k:'estado', t:'Estado', html:f=>pillEstado(f.estado)},
+    {k:'obs', t:'Obs.'}
+  ];
+
+  return renderTablaOrdenable('prestamos', cols, filas, {
+    filaAttrs: f => `style="cursor:pointer" data-action="goto" data-screen="detalle" data-id="${f.id}"`
+  });
 }
 function renderTablaAbonos(){
-  const rows = MOVS.slice().sort((a,b)=>parseDMY(a.fecha)-parseDMY(b.fecha)).map(m=>{
+  const filas = MOVS.map(m => {
     const p = prestamoById(m.prestamoId);
-    return `<tr><td>${p?p.id:m.prestamoId}</td><td>${p?p.cliente:''}</td><td>${m.fecha}</td><td>${formatMoney(m.monto)}</td><td>${m.metodo}</td><td>${m.rebajaAplicada?formatMoney(m.rebajaAplicada):'-'}</td><td>${pillMovEstado(m)}</td><td>${m.nota||''}</td></tr>`;
-  }).join('');
-  return `<div class="table-wrap"><table>
-    <thead><tr><th>N° préstamo</th><th>Cliente</th><th>Fecha</th><th>Monto</th><th>Método</th><th>Rebaja</th><th>Estado</th><th>Nota</th></tr></thead>
-    <tbody>${rows}</tbody></table></div>`;
+    return {
+      m, prestamo: p ? p.id : m.prestamoId, cliente: p ? p.cliente : '',
+      fecha: m.fecha, monto: m.monto, metodo: m.metodo,
+      rebaja: m.rebajaAplicada || 0, estado: m.estado, nota: m.nota || ''
+    };
+  });
+  const cols = [
+    {k:'prestamo', t:'N° préstamo'},
+    {k:'cliente', t:'Cliente'},
+    {k:'fecha', t:'Fecha', tipo:'fecha'},
+    {k:'monto', t:'Monto', tipo:'num', html:f=>formatMoney(f.monto)},
+    {k:'metodo', t:'Método'},
+    {k:'rebaja', t:'Rebaja', tipo:'num', html:f=>f.rebaja?formatMoney(f.rebaja):'-'},
+    {k:'estado', t:'Estado', html:f=>pillMovEstado(f.m)},
+    {k:'nota', t:'Nota'}
+  ];
+  // Sin orden elegido, de la más vieja a la más nueva, como estaba.
+  if(!ordenDe('abonos')) filas.sort((a,b)=>parseDMY(a.fecha)-parseDMY(b.fecha));
+  return renderTablaOrdenable('abonos', cols, filas);
 }
 function renderTablaResumen(){
   const r = calcResumen(); const porSocio = resumenPorSocio();
@@ -3065,21 +3233,22 @@ function renderVencidos(){
 
   <div class="card">
     <h3>Moras aplicadas (${aplicadas.length})</h3>
-    ${aplicadas.length===0 ? '<div class="empty">Todavía no se ha cobrado ninguna mora.</div>' : `
-      <div class="table-wrap"><table>
-        <thead><tr><th>N°</th><th>Fecha</th><th>Préstamo</th><th>Meses</th><th>Saldo base</th><th>Monto</th><th>Vencimiento</th><th>Estado</th><th></th></tr></thead>
-        <tbody>${aplicadas.map(m=>{
-          const p = prestamoById(m.prestamoId);
-          return `<tr${m.anulado?' class="fila-anulada"':''}>
-            <td>${m.numero}</td><td>${m.fecha}</td>
-            <td>${m.prestamoId}${p?' · '+p.cliente:''}</td>
-            <td>${m.meses}</td><td>${formatMoney(m.saldoBase)}</td><td>${formatMoney(m.monto)}</td>
-            <td>${m.vencimientoAnterior} → ${m.vencimientoNuevo}</td>
-            <td>${m.anulado?`<span class="pill pill-rechazado">Anulada</span>`:'<span class="pill pill-cancelado">Aplicada</span>'}</td>
-            <td>${m.anulado?`<span class="muted">${m.motivoAnulacion}</span>`:`<button class="btn btn-ghost btn-sm no-print" data-action="anular-mora" data-numero="${m.numero}">Anular</button>`}</td>
-          </tr>`;
-        }).join('')}</tbody>
-      </table></div>`}
+    ${aplicadas.length===0 ? '<div class="empty">Todavía no se ha cobrado ninguna mora.</div>' :
+      renderTablaOrdenable('moras', [
+        {k:'numero', t:'N°'},
+        {k:'fecha', t:'Fecha', tipo:'fecha'},
+        {k:'cliente', t:'Préstamo', html:m=>`${m.prestamoId}${m.cliente?' · '+m.cliente:''}`},
+        {k:'meses', t:'Meses', tipo:'num'},
+        {k:'saldoBase', t:'Saldo base', tipo:'num', html:m=>formatMoney(m.saldoBase)},
+        {k:'monto', t:'Monto', tipo:'num', html:m=>formatMoney(m.monto)},
+        {k:'vencimientoNuevo', t:'Vencimiento', tipo:'fecha', html:m=>`${m.vencimientoAnterior} → ${m.vencimientoNuevo}`},
+        {k:'anulado', t:'Estado', html:m=>m.anulado?'<span class="pill pill-rechazado">Anulada</span>':'<span class="pill pill-cancelado">Aplicada</span>'},
+        {k:'acciones', t:'', ordenable:false, html:m=>m.anulado
+          ? `<span class="muted">${m.motivoAnulacion}</span>`
+          : `<button class="btn btn-ghost btn-sm no-print" data-action="anular-mora" data-numero="${m.numero}">Anular</button>`}
+      ], aplicadas.map(m=>({...m, cliente:(prestamoById(m.prestamoId)||{}).cliente||''})), {
+        filaAttrs: m => m.anulado ? 'class="fila-anulada"' : ''
+      })}
   </div>`;
 }
 
@@ -3401,6 +3570,23 @@ document.addEventListener('click', async function(e){
   if(action==='pdf-cierre'){ abrirPdfCierre(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-reversa'){ abrirPdfReversa(t.dataset.mov); return; }
   if(action==='ver-recibos-cierre'){ STATE.modal = {type:'recibos-cierre', numero:t.dataset.numero}; render(); return; }
+  if(action==='limpiar-filtros-recibos'){
+    e.preventDefault();
+    STATE.recibosBusqueda = ''; STATE.recibosDesde = ''; STATE.recibosHasta = '';
+    render();
+    return;
+  }
+  if(action==='ordenar'){
+    // Primer toque ordena de mayor a menor, que para montos y fechas es lo
+    // que uno quiere ver primero. El segundo invierte. El tercero lo quita.
+    const tabla = t.dataset.tabla, col = t.dataset.col;
+    const actual = STATE.orden[tabla];
+    if(!actual || actual.col !== col)      STATE.orden[tabla] = {col, dir:'desc'};
+    else if(actual.dir === 'desc')         STATE.orden[tabla] = {col, dir:'asc'};
+    else                                    delete STATE.orden[tabla];
+    render();
+    return;
+  }
   if(action==='aplicar-mora'){
     const id = t.dataset.prestamo;
     const meses = Number((document.querySelector(`.mora-meses[data-prestamo="${id}"]`)||{}).value) || 1;
@@ -3715,6 +3901,13 @@ document.addEventListener('change', function(e){
       </div>` : `<div class="notice warn">No aplica rebaja para esta fecha (a menos de ${CONFIG.umbralDias} días del vencimiento, o ya se cobraron todos los meses).</div>`;
     return;
   }
+  if(e.target.id==='recibos-desde' || e.target.id==='recibos-hasta'){
+    if(e.target.id==='recibos-desde') STATE.recibosDesde = e.target.value;
+    else STATE.recibosHasta = e.target.value;
+    const caja = document.getElementById('tabla-recibos-cuerpo');
+    if(caja) caja.innerHTML = renderTablaRecibosCuerpo();
+    return;
+  }
   if(e.target.id==='historial-desde' || e.target.id==='historial-hasta'){
     STATE.historialDesde = document.getElementById('historial-desde').value;
     STATE.historialHasta = document.getElementById('historial-hasta').value;
@@ -3898,6 +4091,12 @@ document.addEventListener('input', function(e){
     const hint = form.querySelector('#prestamo-elegido');
     if(hint) hint.textContent = 'Escribe para buscar y toca un préstamo de la lista.';
     renderClienteSuggestions(form, e.target.value);
+  }
+  if(e.target.id==='recibos-buscar'){
+    STATE.recibosBusqueda = e.target.value;
+    const caja = document.getElementById('tabla-recibos-cuerpo');
+    if(caja) caja.innerHTML = renderTablaRecibosCuerpo();
+    return;
   }
   if(e.target.id==='buscar-cartera'){
     STATE.busquedaCartera = e.target.value;
