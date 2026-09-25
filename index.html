@@ -449,7 +449,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.3';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -1622,6 +1622,224 @@ function construirPdfCierre(ci, reimpresion){
   c.texto('Documento interno de control. No sustituye factura electronica.', 7, 'F1', margen);
   return c.build();
 }
+
+/* =========================================================
+   GUIA RAPIDA PARA LOS SOCIOS
+   Se arma con el mismo motor que los recibos, no con un archivo aparte: asi
+   el telefono la baja igual que cualquier otro PDF de la app. Un archivo que
+   viaja por WhatsApp se pierde; este boton siempre tiene la version de hoy.
+   ========================================================= */
+const GUIA_PASOS = [
+  { titulo:'Entrar por primera vez',
+    intro:'La administración te envía un enlace y un código de ocho caracteres. El código sirve una sola vez y es solo tuyo.',
+    pasos:[
+      'Abrí el enlace que te mandaron.',
+      'Escribí tu correo, el mismo que le diste a la administración.',
+      'Escribí el código en la casilla que dice "Código". Da igual si lo ponés en mayúscula o minúscula.',
+      'En "Contraseña nueva" poné la clave que vos querás, de ocho caracteres o más, y repetila abajo.',
+      'Tocá "Crear mi contraseña". Entrás de una vez.'
+    ],
+    aviso:'Nadie más conoce tu contraseña, ni la administración. Si se te olvida, pedí que te generen un código nuevo.' },
+
+  { titulo:'Dejar la app en tu teléfono',
+    intro:'Así entrás con un toque, sin buscar el enlace cada vez.',
+    pasos:[
+      'Abrí la aplicación en el navegador del teléfono.',
+      'iPhone: tocá el botón de compartir, el cuadrito con la flecha hacia arriba, y elegí "Agregar a pantalla de inicio".',
+      'Android: tocá los tres puntos del navegador y elegí "Instalar aplicación" o "Agregar a pantalla principal".'
+    ],
+    aviso:'La primera vez que la abrás desde el ícono te va a pedir el correo y la contraseña otra vez. Después se queda.' },
+
+  { titulo:'Ver tu cartera',
+    intro:'Al entrar caés en "Mi cartera": ahí están únicamente tus préstamos. No ves los de los demás socios, ni ellos los tuyos.',
+    pasos:[
+      'Los botones de arriba filtran por Vigentes, Vencidos y Cancelados.',
+      'El buscador encuentra por nombre de cliente o por número de préstamo.',
+      'Tocá cualquier préstamo para ver su detalle: saldo confirmado, total a pagar, fecha de vencimiento y el historial completo de abonos.'
+    ] },
+
+  { titulo:'Registrar un abono',
+    intro:'Cuando un cliente te paga, lo anotás aquí. Es lo que vas a hacer casi todos los días.',
+    pasos:[
+      'Tocá "Registrar abono".',
+      'Escribí el nombre del cliente y tocalo en la lista que aparece.',
+      'Poné la fecha real en que el cliente pagó, no la de hoy.',
+      'Escribí el monto.',
+      'Elegí el método: Efectivo, Transferencia o SINPE Móvil.',
+      'Si tenés el comprobante, agregá la foto. Ayuda mucho a la hora de aprobar.',
+      'Tocá "Registrar abono".'
+    ],
+    aviso:'La fecha importa de verdad. Con ella se calculan los intereses y si al cliente le toca rebaja por pagar antes del vencimiento. Si ponés la de hoy cuando pagó hace tres días, el cálculo sale mal.',
+    cola:'Mientras escribís el monto, debajo aparece un aviso que te dice cuánto le quedaría debiendo, y si con ese pago el préstamo queda cancelado y cuánta rebaja de intereses le corresponde.' },
+
+  { titulo:'Qué significa cada estado',
+    intro:'Un abono que registrás no baja el saldo todavía. Primero lo revisa la administración.',
+    tabla:[
+      ['Pendiente','Transferencia o SINPE esperando que la administración lo apruebe.'],
+      ['Reportado, pendiente de caja','Efectivo. Se confirma cuando entregás la plata y se hace el cierre del día.'],
+      ['Aprobado','Listo. Ya bajó el saldo del cliente y se emitió el recibo.'],
+      ['Confirmado en caja','Igual que aprobado, para los abonos en efectivo.'],
+      ['Rechazado','La administración lo devolvió. Mirá el paso 6.']
+    ],
+    cola:'Los ves en "Mis abonos pendientes de aprobación" y en "Historial de mis abonos", dentro de la pantalla de registrar.' },
+
+  { titulo:'Si te rechazan un abono',
+    intro:'No se pierde ni hay que empezar de cero.',
+    pasos:[
+      'En "Mi cartera", de primero, aparece la tarjeta "Abonos que hay que corregir".',
+      'Ahí leés el motivo que escribió la administración.',
+      'Tocá "Corregir y volver a enviar".',
+      'El formulario llega con todo puesto: cliente, fecha, monto, método y tu nota. Arreglá lo que te indicaron y enviá.'
+    ],
+    aviso:'El abono rechazado se conserva con su motivo, no se borra. Así queda claro qué pasó.' },
+
+  { titulo:'Solicitar un préstamo nuevo',
+    intro:'Cuando un cliente te pide plata, vos lo proponés y la administración decide.',
+    pasos:[
+      'Tocá "Solicitar préstamo".',
+      'Nombre del cliente, monto y plazo en meses.',
+      'Elegí cómo se le va a entregar la plata. Si es SINPE o transferencia, poné el número de teléfono o de cuenta.',
+      'En la nota, contá lo que la administración necesite saber para decidir.',
+      'Enviá. La seguís en "Mis solicitudes", ahí mismo abajo.'
+    ] },
+
+  { titulo:'Imprimir o guardar un recibo',
+    intro:'Cada abono aprobado tiene su recibo, y los pagos viejos también.',
+    pasos:[
+      'Entrá al préstamo desde "Mi cartera".',
+      'Bajá hasta "Historial de abonos".',
+      'Tocá "Reimprimir recibo" en el abono que necesités.',
+      'Se descarga un PDF que podés mandar por WhatsApp o imprimir.'
+    ] },
+
+  { titulo:'Cosas que conviene tener claras',
+    notas:[
+      ['Los datos son reales','Ahí están los nombres y los montos de clientes de verdad. No compartás tu contraseña ni le prestés el teléfono abierto a nadie.'],
+      ['El efectivo hay que entregarlo','Registrar un abono en efectivo no es lo mismo que entregar la plata. El saldo del cliente baja cuando la administración cuenta el dinero en el cierre del día.'],
+      ['Si te equivocaste','Mientras esté pendiente, avisale a la administración para que lo rechace y lo corregís vos. Si ya está aprobado, solo la administración puede reversarlo.'],
+      ['Si algo no calza','Si un saldo no cuadra con lo que vos tenés anotado, no lo arregles por tu cuenta registrando un abono de más o de menos. Avisá y se revisa.']
+    ],
+    aviso:'¿Dudas con algo que no está aquí? Escribile a la administración de Lazos.' }
+];
+function construirPdfGuia(){
+  const pageW = 612, pageH = 792, margen = 54;
+  const ancho = pageW - margen*2;
+  const c = pdfLienzo(pageW, pageH, margen);
+  const VERDE = '0.05 0.37 0.24 rg', NEGRO = '0 0 0 rg', GRIS = '0.34 0.42 0.38 rg';
+
+  function parrafo(txt, size, font, x){
+    size = size || 10; font = font || 'F1'; x = (x === undefined) ? margen : x;
+    pdfEnvolver(txt, pageW - margen - x, size).forEach(l => {
+      c.asegurarEspacio(size + 5);
+      c.texto(l, size, font, x);
+      c.bajar(size + 5);
+    });
+  }
+  function vineta(n, txt){
+    const x = margen + 20;
+    const lineas = pdfEnvolver(txt, pageW - margen - x, 10);
+    c.asegurarEspacio(lineas.length * 15 + 3);
+    c.ops.push(VERDE);
+    c.texto(n + '.', 10, 'F2', margen + 4);
+    c.ops.push(NEGRO);
+    lineas.forEach(l => { c.texto(l, 10, 'F1', x); c.bajar(15); });
+  }
+  function aviso(txt){
+    const lineas = pdfEnvolver(txt, ancho - 22, 9.5);
+    const alto = lineas.length * 14 + 8;
+    c.asegurarEspacio(alto + 12);
+    const yTop = c.y + 11;
+    c.ops.push('0.98 0.66 0.18 rg',
+               margen + ' ' + (yTop - alto).toFixed(1) + ' 3 ' + alto.toFixed(1) + ' re f',
+               NEGRO);
+    lineas.forEach(l => { c.texto(l, 9.5, 'F1', margen + 14); c.bajar(14); });
+    c.bajar(10);
+  }
+  function titulo(n, txt){
+    // Reserva de sobra: un titulo solo al pie de la hoja, con un renglon
+    // debajo, se lee como si el paso se hubiera cortado a la mitad.
+    c.asegurarEspacio(130);
+    c.bajar(10);
+    c.ops.push(VERDE);
+    c.texto(String(n), 15, 'F2', margen);
+    c.texto(txt, 15, 'F2', margen + 22);
+    c.ops.push(NEGRO);
+    c.bajar(10);
+    c.ops.push('0.80 0.86 0.83 RG');
+    c.linea();
+    c.ops.push('0.05 0.37 0.24 RG');
+    c.bajar(18);
+  }
+  function filaTabla(estado, texto){
+    const xd = margen + 160;
+    const lineas = pdfEnvolver(texto, pageW - margen - xd, 9);
+    const alto = Math.max(lineas.length, 1) * 13;
+    c.asegurarEspacio(alto + 12);
+    c.texto(estado, 9, 'F2', margen);
+    lineas.forEach(l => { c.texto(l, 9, 'F1', xd); c.bajar(13); });
+    if(lineas.length === 0) c.bajar(13);
+    c.bajar(4);
+    c.ops.push('0.85 0.90 0.87 RG');
+    c.linea();
+    c.ops.push('0.05 0.37 0.24 RG');
+    c.bajar(12);
+  }
+
+  /* Portada */
+  c.logo(30); c.bajar(76);
+  c.ops.push(VERDE);
+  c.texto('Gu\u00eda r\u00e1pida', 30, 'F2', margen);
+  c.ops.push(NEGRO);
+  c.bajar(20);
+  c.ops.push('0.98 0.66 0.18 rg', margen + ' ' + c.y.toFixed(1) + ' 56 4 re f', NEGRO);
+  c.bajar(22);
+  c.ops.push(GRIS);
+  c.texto('C\u00f3mo usar la aplicaci\u00f3n de Lazos. Para los socios, en nueve pasos.', 12, 'F1', margen);
+  c.ops.push(NEGRO);
+  c.bajar(34);
+
+  c.ops.push(VERDE);
+  c.texto('LO QUE VAS A ENCONTRAR', 9, 'F2', margen);
+  c.ops.push(NEGRO);
+  c.bajar(18);
+  GUIA_PASOS.forEach((s, i) => {
+    c.ops.push(VERDE);
+    c.texto(String(i+1), 10, 'F2', margen + 4);
+    c.ops.push(NEGRO);
+    c.texto(s.titulo, 10, 'F1', margen + 22);
+    c.bajar(16);
+  });
+  c.nuevaPagina();
+
+  /* Los nueve pasos */
+  GUIA_PASOS.forEach((s, i) => {
+    titulo(i + 1, s.titulo);
+    if(s.intro) { parrafo(s.intro); c.bajar(6); }
+    if(s.pasos) { s.pasos.forEach((t, j) => vineta(j + 1, t)); c.bajar(6); }
+    if(s.tabla) { s.tabla.forEach(f => filaTabla(f[0], f[1])); }
+    if(s.notas) {
+      s.notas.forEach(n => {
+        c.asegurarEspacio(50);
+        c.ops.push(VERDE);
+        c.texto(n[0], 11, 'F2', margen);
+        c.ops.push(NEGRO);
+        c.bajar(16);
+        parrafo(n[1]);
+        c.bajar(8);
+      });
+    }
+    if(s.aviso) aviso(s.aviso);
+    if(s.cola)  { parrafo(s.cola); c.bajar(6); }
+    c.bajar(14);
+  });
+
+  return c.build();
+}
+
+function abrirPdfGuia(){
+  return entregarPdf(construirPdfGuia, 'Guia-rapida-Lazos.pdf', 'la guia rapida');
+}
+
 function pdfStringToBytes(str){
   const bytes = new Uint8Array(str.length);
   for(let i=0;i<str.length;i++) bytes[i] = str.charCodeAt(i) & 0xFF;
@@ -2151,6 +2369,7 @@ function renderRegistro(){
    dice de quién es el sistema y con qué versión se está trabajando. */
 function renderPieLegal(){
   return `<footer class="pie-legal no-print">
+    <div><button class="btn btn-ghost btn-sm" data-action="pdf-guia">Descargar la guía rápida (PDF)</button></div>
     <div>Lazos · Sistema de control de cartera</div>
     <div>© ${new Date().getFullYear()} Lazos. Uso interno. Todos los derechos reservados.</div>
     <div class="pie-version">Versión ${APP_VERSION}</div>
@@ -3654,6 +3873,7 @@ document.addEventListener('click', async function(e){
   if(action==='abrir-reversa'){ STATE.modal = {type:'reversa', movId:t.dataset.mov}; render(); return; }
   if(action==='abrir-rechazo-solicitud'){ STATE.modal = {type:'rechazo-solicitud', solId:t.dataset.sol}; render(); return; }
   if(action==='ver-imagen'){ STATE.modal = {type:'imagen', src:t.dataset.src}; render(); return; }
+  if(action==='pdf-guia'){ abrirPdfGuia(); return; }
   if(action==='pdf-recibo'){ abrirPdfRecibo(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-cierre'){ abrirPdfCierre(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-reversa'){ abrirPdfReversa(t.dataset.mov); return; }
