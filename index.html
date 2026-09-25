@@ -449,7 +449,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.1';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -605,6 +605,10 @@ function filaARecibo(r){
     saldoNuevo: Number(r.saldo_nuevo),
     proximoVencimiento: isoADmy(r.proximo_vencimiento),
     movId: r.movimiento_id,
+    abonoId: r.abono_id || null,
+    // 'carga_inicial' = reconstruido del Excel, no se entregó ese día.
+    origen: r.origen || 'sistema',
+    rebaja: Number(r.rebaja || 0),
     anulado: !!r.anulado,
     anuladoEn: isoADmy(r.anulado_en),
     motivoAnulacion: r.motivo_anulacion || '',
@@ -725,6 +729,15 @@ async function cargarTodo(){
 
   RECIBOS.length = 0;
   (recibos.data || []).forEach(r => RECIBOS.push(filaARecibo(r)));
+
+  // Los abonos de la carga inicial entran a MOVS con id 'H-<id>'. Se les pega
+  // el número de su recibo para que la ficha del préstamo ofrezca
+  // reimprimirlo, igual que con un abono registrado en la aplicación.
+  RECIBOS.forEach(r => {
+    if(!r.abonoId) return;
+    const m = movPorId('H-' + r.abonoId);
+    if(m) m.reciboNumero = r.numero;
+  });
 
   CIERRES.length = 0;
   (cierres.data || []).forEach(r => CIERRES.push(filaACierre(r)));
@@ -1373,19 +1386,33 @@ function construirPdfRecibo(r, reimpresion){
     c.bajar(6); c.linea(); c.bajar(18);
   }
 
-  [
+  const lineas = [
     ['Fecha', r.fecha],
     ['Cliente', r.cliente],
     ['N de prestamo', r.prestamoId],
     ['Monto abonado', pdfMoney(r.monto)],
-    ['Metodo', r.metodo],
+    ['Metodo', r.metodo]
+  ];
+  // La rebaja explica por qué el saldo bajó más que el pago. Sin esta línea
+  // el cliente no puede cuadrar su cuenta.
+  if(r.rebaja > 0) lineas.push(['Rebaja por pronto pago', pdfMoney(r.rebaja)]);
+  lineas.push(
     ['Saldo anterior', pdfMoney(r.saldoAnterior)],
     ['Saldo nuevo', pdfMoney(r.saldoNuevo)],
     ['Proxima fecha de vencimiento', r.proximoVencimiento]
-  ].forEach(([k,v])=>{ c.fila(k, v); c.bajar(18); });
+  );
+  lineas.forEach(([k,v])=>{ c.fila(k, v); c.bajar(18); });
 
   c.bajar(10);
   c.texto('Recibo interno. No sustituye factura electronica.' + (reimpresion ? ' Reimpreso el '+SEED.fechaCorte+'.' : ''), 7, 'F1', margen);
+  // Un papel que parece emitido en marzo y se imprimio en septiembre es justo
+  // lo que despues nadie puede explicar. Que lo diga el papel mismo.
+  if(r.origen === 'carga_inicial'){
+    c.bajar(10);
+    c.texto('Comprobante reconstruido del registro inicial de Lazos,', 7, 'F1', margen);
+    c.bajar(9);
+    c.texto('no emitido en la fecha del pago.', 7, 'F1', margen);
+  }
   return c.build();
 }
 
@@ -2923,6 +2950,9 @@ function renderTablas(){
    reversado, rechazado o que nunca se aprobó no tiene nada que deshacer. */
 function reciboReversable(r){
   if(r.anulado) return false;
+  // Un recibo de la carga inicial no cuelga de ningún movimiento: no hay nada
+  // que deshacer. Esos pagos se corrigen en el Excel de origen, no acá.
+  if(r.origen === 'carga_inicial' || !r.movId) return false;
   const m = movPorId(r.movId);
   return !!m && m.tipo === 'abono' && esAprobado(m) && !m.reversadoPorId;
 }
@@ -2942,7 +2972,8 @@ function recibosFiltrados(){
     // Se busca por todo lo que una persona recuerda de un recibo: el número,
     // el cliente, el préstamo, el método, o el monto tal como lo ve escrito.
     return [r.numero, r.cliente, r.prestamoId, r.metodo,
-            String(r.monto), formatMoney(r.monto), r.motivoAnulacion, r.anuladoPor]
+            String(r.monto), formatMoney(r.monto), r.motivoAnulacion, r.anuladoPor,
+            r.origen === 'carga_inicial' ? 'inicial excel carga' : 'sistema']
       .some(v => String(v || '').toLowerCase().includes(q));
   });
 }
@@ -2975,12 +3006,15 @@ function renderTablaRecibosCuerpo(){
      evidencia de que ese recibo llegó a existir. */
   const anulados = RECIBOS.filter(r=>r.anulado).length;
   const cols = [
-    {k:'numero', t:'N°', html:r=>`${r.numero}${r.anulado?' <span class="pill pill-rechazado">Anulado</span>':''}`},
+    {k:'numero', t:'N°', html:r=>`${r.numero}`
+      + (r.anulado ? ' <span class="pill pill-rechazado">Anulado</span>' : '')
+      + (r.origen === 'carga_inicial' ? ' <span class="pill pill-reversado" title="Reconstruido del registro inicial">Inicial</span>' : '')},
     {k:'fecha', t:'Fecha', tipo:'fecha'},
     {k:'cliente', t:'Cliente'},
     {k:'prestamoId', t:'Préstamo'},
     {k:'monto', t:'Monto', tipo:'num', html:r=>formatMoney(r.monto)},
     {k:'metodo', t:'Método'},
+    {k:'rebaja', t:'Rebaja', tipo:'num', html:r=>r.rebaja?formatMoney(r.rebaja):'-'},
     {k:'saldoAnterior', t:'Saldo anterior', tipo:'num', html:r=>formatMoney(r.saldoAnterior)},
     {k:'saldoNuevo', t:'Saldo nuevo', tipo:'num', html:r=>formatMoney(r.saldoNuevo)},
     {k:'anulado', t:'Estado', html:r=>r.anulado
