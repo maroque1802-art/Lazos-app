@@ -449,7 +449,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '2.1';
+const APP_VERSION = '2.2';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -1304,9 +1304,42 @@ function ensamblarPdf(pageW, pageH, contenidos){
 }
 
 /* Lienzo de dibujo: acumula operadores PDF y lleva la posición vertical. */
+/* Cuándo se imprimió este papel. En una reimpresión es lo que distingue la
+   copia del original, y en cualquier caso dice de cuándo son los números. */
+function selloDeImpresion(){
+  const d = new Date();
+  const dos = n => String(n).padStart(2,'0');
+  return `${dos(d.getDate())}/${dos(d.getMonth()+1)}/${d.getFullYear()} a las ${dos(d.getHours())}:${dos(d.getMinutes())}`;
+}
+
+/* El pie va anclado abajo de CADA hoja, fuera del flujo del contenido: sin
+   esto, en un cierre de dos páginas la segunda salía sin identificar. */
+function pdfOpsPie(pageW, margen, pagina, total){
+  const gris = '0.45 0.45 0.45 rg';
+  const linea = margen + 30;
+  const fila1 = margen + 19;
+  const fila2 = margen + 9;
+  const txt = (str, size, font, x, y) =>
+    `BT /${font} ${size} Tf ${x} ${y} Td (${pdfEscapeText(str)}) Tj ET`;
+  const der = (str, size, font, y) =>
+    txt(str, size, font, Math.max(margen, pageW - margen - pdfAnchoTexto(String(str), size)), y);
+
+  return [
+    '0.35 w', '0.75 0.75 0.75 RG',
+    `${margen} ${linea} m ${pageW-margen} ${linea} l S`,
+    gris,
+    txt('Lazos - Sistema de control de cartera', 6.5, 'F2', margen, fila1),
+    der(`Pagina ${pagina} de ${total}`, 6.5, 'F1', fila1),
+    txt(`© ${new Date().getFullYear()} Lazos. Documento de uso interno.`, 6, 'F1', margen, fila2),
+    der('Impreso el ' + selloDeImpresion(), 6, 'F1', fila2),
+    '0 0 0 rg', '0 0 0 RG', '0.55 w'
+  ];
+}
+
 function pdfLienzo(pageW, pageH, margen){
   const yInicial = pageH - margen - 16;
-  const yPie = margen + 30;
+  // Deja libre la franja del pie: el contenido no debe montarse encima.
+  const yPie = margen + 44;
   const marco = ['0.55 w', '0.05 0.37 0.24 RG', `10 10 ${pageW-20} ${pageH-20} re S`, '0 0 0 rg'];
   const paginas = [[]];
   let actual = 0;
@@ -1341,7 +1374,23 @@ function pdfLienzo(pageW, pageH, margen){
       api.y -= n;
       if(api.y < yPie) api.nuevaPagina();
     },
-    build(){ return ensamblarPdf(pageW, pageH, paginas.map(p=>marco.concat(p).join('\n'))); }
+    /* Dos líneas de firma, una al lado de la otra. */
+    firmas(izq, der){
+      api.asegurarEspacio(48);
+      api.bajar(26);
+      const ancho = (pageW - margen*2 - 16) / 2;
+      const x2 = margen + ancho + 16;
+      api.ops.push(`${margen} ${api.y.toFixed(1)} m ${(margen+ancho).toFixed(1)} ${api.y.toFixed(1)} l S`);
+      api.ops.push(`${x2.toFixed(1)} ${api.y.toFixed(1)} m ${(pageW-margen).toFixed(1)} ${api.y.toFixed(1)} l S`);
+      api.bajar(10);
+      api.texto(izq, 7, 'F1', margen);
+      api.texto(der, 7, 'F1', x2);
+    },
+    build(){
+      const total = paginas.length;
+      return ensamblarPdf(pageW, pageH, paginas.map((p, i) =>
+        marco.concat(p, pdfOpsPie(pageW, margen, i+1, total)).join('\n')));
+    }
   };
   return api;
 }
@@ -1361,7 +1410,11 @@ function pdfEnvolver(texto, anchoMax, size){
 }
 
 function construirPdfRecibo(r, reimpresion){
-  const pageW = 300, pageH = 460, margen = 30;
+  // Un recibo anulado lleva encima el motivo y la nota que lo anuló, así que
+  // necesita más papel: con el alto normal las notas del pie se iban a una
+  // segunda hoja, y un comprobante de pago de dos páginas no tiene sentido.
+  const pageW = 300, margen = 30;
+  const pageH = r.anulado ? 560 : 460;
   const c = pdfLienzo(pageW, pageH, margen);
   c.logo(26); c.bajar(40);
   if(reimpresion){ c.texto('REIMPRESION', 10, 'F2', margen); c.bajar(14); }
@@ -1403,8 +1456,14 @@ function construirPdfRecibo(r, reimpresion){
   );
   lineas.forEach(([k,v])=>{ c.fila(k, v); c.bajar(18); });
 
-  c.bajar(10);
-  c.texto('Recibo interno. No sustituye factura electronica.' + (reimpresion ? ' Reimpreso el '+SEED.fechaCorte+'.' : ''), 7, 'F1', margen);
+  // Quien recibe la plata firma; el cliente firma que se lleva el papel.
+  // En uno anulado no: ese papel es evidencia de algo que se deshizo, no un
+  // documento que alguien tenga que firmar, y las firmas lo empujaban a una
+  // segunda hoja.
+  if(!r.anulado) c.firmas('Recibido por (Lazos)', 'Conforme, el cliente');
+
+  c.bajar(26);
+  c.texto('Recibo interno. No sustituye factura electronica.', 7, 'F1', margen);
   // Un papel que parece emitido en marzo y se imprimio en septiembre es justo
   // lo que despues nadie puede explicar. Que lo diga el papel mismo.
   if(r.origen === 'carga_inicial'){
@@ -1444,7 +1503,9 @@ function construirPdfReversa(rev, original, recibo){
   pdfEnvolver((rev.nota || '').replace(/^Reversa: /, ''), pageW - margen*2, 8)
     .forEach(l=>{ c.texto(l, 8, 'F1', margen); c.bajar(11); });
 
-  c.bajar(14);
+  c.firmas('Autorizado por (Lazos)', 'Enterado, el cliente');
+
+  c.bajar(26);
   c.texto('Este documento deja sin efecto el abono descrito', 7, 'F1', margen); c.bajar(9);
   c.texto('y anula el recibo indicado.', 7, 'F1', margen);
   return c.build();
@@ -1556,16 +1617,9 @@ function construirPdfCierre(ci, reimpresion){
     c.bajar(22);
   }
 
-  // El bloque de firmas necesita alto propio: si no cabe, va en la hoja siguiente.
-  c.asegurarEspacio(70);
-  c.bajar(24);
-  c.ops.push(`${margen} ${c.y.toFixed(1)} m ${margen+200} ${c.y.toFixed(1)} l S`);
-  c.ops.push(`${pageW-margen-200} ${c.y.toFixed(1)} m ${pageW-margen} ${c.y.toFixed(1)} l S`);
-  c.bajar(13);
-  c.texto('Elaborado por (administrador)', 8, 'F1', margen);
-  c.textoDerecha('Revisado por', 8, 'F1', pageW - margen);
-  c.bajar(30);
-  c.texto('Documento interno de control. No sustituye factura electronica.' + (reimpresion ? ' Reimpreso el '+SEED.fechaCorte+'.' : ''), 7, 'F1', margen);
+  c.firmas('Elaborado por (administrador)', 'Revisado por');
+  c.bajar(26);
+  c.texto('Documento interno de control. No sustituye factura electronica.', 7, 'F1', margen);
   return c.build();
 }
 function pdfStringToBytes(str){
