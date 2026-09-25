@@ -449,7 +449,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.4';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -3562,7 +3562,7 @@ function renderVencidos(){
 /* ---------- ADMIN: Accesos ---------- */
 function estadoDelAcceso(a){
   if(a.tienePerfil)  return {texto:'Ya entra', clase:'pill-cancelado'};
-  if(a.tieneCuenta)  return {texto:'Creó cuenta sin código', clase:'pill-rechazado'};
+  if(a.tieneCuenta)  return {texto:'Falta vincularla', clase:'pill-rechazado'};
   if(a.codigoUsado)  return {texto:'Código usado', clase:'pill-pendiente'};
   return {texto:'Esperando que se registre', clase:'pill-pendiente'};
 }
@@ -3585,13 +3585,17 @@ function renderAccesos(){
         <span class="muted">Código</span><code>${a.codigo}</code>
       </div>` : '<div class="muted" style="font-size:12.5px; margin-top:6px;">Sin código. Generá uno para que pueda registrarse.</div>'}
       ${a.tieneCuenta && !a.tienePerfil ? `<div class="notice warn" style="margin-top:8px;">
-        Creó la cuenta pero el código no coincidió, así que no ve nada. Si estás seguro de que es la persona correcta, vinculala; si no, generale un código nuevo y que lo intente de nuevo con otro correo.
+        <b>Ya creó la cuenta, pero sin el código válido, así que no ve nada.</b>
+        Mandarle un código nuevo no lo arregla: el código solo se revisa en el
+        momento de crear la cuenta, y esa cuenta ya existe. Si te consta que es
+        la persona correcta, tocá <b>Vincular</b> y entra de una vez. Si no,
+        quitala de la lista y que empiece otra vez con otro correo.
       </div>` : ''}
       <div class="acceso-botones no-print">
-        ${a.tienePerfil ? '' : `
+        ${a.tienePerfil || a.tieneCuenta ? '' : `
           <button class="btn btn-primary btn-sm" data-action="copiar-invitacion" data-correo="${a.correo}">Copiar mensaje</button>
           <button class="btn btn-ghost btn-sm" data-action="regenerar-codigo" data-correo="${a.correo}">Código nuevo</button>`}
-        ${a.tieneCuenta && !a.tienePerfil ? `<button class="btn btn-ghost btn-sm" data-action="vincular-cuenta" data-correo="${a.correo}">Vincular</button>` : ''}
+        ${a.tieneCuenta && !a.tienePerfil ? `<button class="btn btn-primary btn-sm" data-action="vincular-cuenta" data-correo="${a.correo}">Vincular y darle acceso</button>` : ''}
         ${a.rol==='administrador' ? '' : `<button class="btn btn-danger btn-sm" data-action="quitar-acceso" data-correo="${a.correo}">Quitar</button>`}
       </div>
     </div>`;
