@@ -244,6 +244,16 @@ main{padding:16px 0 40px;}
   border-radius:8px; padding:5px 11px; color:var(--text); user-select:all;
 }
 .acceso-botones{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
+.cifras{display:flex; flex-direction:column; gap:0; margin:6px 0 4px;}
+.cifras > div{display:flex; justify-content:space-between; align-items:baseline;
+  gap:14px; padding:8px 0; border-bottom:1px solid var(--border);}
+.cifras > div:last-child{border-bottom:none;}
+.cifras .k{color:var(--muted); min-width:0;}
+.cifras .v{font-weight:700; white-space:nowrap; font-variant-numeric:tabular-nums;}
+.cifras .fuerte .k{color:var(--text); font-weight:700;}
+.globo{position:absolute; top:-4px; right:-10px; background:#c0392b; color:#fff;
+  font-size:10px; font-weight:700; line-height:1; padding:2px 5px; border-radius:99px;}
+.bottom-nav .ic{position:relative;}
 
 .fila-anulada td{opacity:.55; text-decoration:line-through;}
 .fila-anulada td:first-child, .fila-anulada td:last-child, .fila-anulada td:nth-last-child(2){text-decoration:none; opacity:1;}
@@ -449,7 +459,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '2.4';
+const APP_VERSION = '2.5';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -465,6 +475,14 @@ const CIERRES = [];
 /* Denominaciones de colon costarricense en circulacion, de mayor a menor. */
 const DENOMINACIONES = [20000, 10000, 5000, 2000, 1000, 500, 100, 50, 25, 10, 5];
 const SOLICITUDES = [];
+/* Bandeja: lo que el administrador les manda a los socios. Un corte mensual
+   lleva sus cifras congeladas dentro; no se recalculan al abrirlo. */
+const MENSAJES = [];
+/* La línea de cada socio dentro de un corte. Postgres solo devuelve la
+   propia: la de otro socio no llega ni por la API. */
+const MENSAJES_DETALLE = [];
+/* Acuses de recibo. El socio ve los suyos; el administrador, todos. */
+const MENSAJES_LEIDOS = [];
 
 /* Una sola lista con los abonos historicos del Excel y los movimientos
    nuevos de la app. Los calculos del prototipo ya trabajan asi. */
@@ -473,6 +491,8 @@ const MOVS = [];
 const STATE = {
   role: null,            // 'socio' | 'admin' — lo define el perfil, no el usuario
   socioActivo: null,     // nombre del socio de la sesion
+  socioId: null,         // su id, para la bandeja y el corte
+  perfilId: null,        // el id de la cuenta, para el acuse de recibo
   sesion: null,
   cargando: false,
   errorCarga: '',
@@ -788,7 +808,9 @@ function nuevoCodigoRegistro(){
 /* Todo lo que la sesión trajo consigo, para soltarlo al salir. */
 function olvidarDatos(){
   [SEED.socios, SEED.prestamos, SEED.abonos, MOVS, RECIBOS, CIERRES,
-   SOLICITUDES, ACCESOS, BITACORA, MORAS, TRASPASOS].forEach(a => { a.length = 0; });
+   SOLICITUDES, ACCESOS, BITACORA, MORAS, TRASPASOS,
+   MENSAJES, MENSAJES_DETALLE, MENSAJES_LEIDOS].forEach(a => { a.length = 0; });
+  STATE.socioId = null; STATE.perfilId = null;
 }
 
 async function cargarBitacora(){
@@ -802,6 +824,46 @@ async function cargarBitacora(){
     motivo: r.motivo || '', hechoPor: r.hecho_por || ''
   }));
 }
+
+async function cargarMensajes(){
+  MENSAJES.length = 0; MENSAJES_DETALLE.length = 0; MENSAJES_LEIDOS.length = 0;
+  const [msgs, det, leidos] = await Promise.all([
+    sb.from('mensajes').select('*').order('creado_en', {ascending:false}),
+    sb.from('mensajes_detalle').select('*'),
+    sb.from('mensajes_leidos').select('*')
+  ]);
+  // Sin la migración 0010 estas tablas no existen; que falten no debe tumbar
+  // la carga entera, igual que con la mora y las bolsas.
+  (msgs && msgs.data ? msgs.data : []).forEach(r => MENSAJES.push({
+    id: r.id, numero: r.numero, tipo: r.tipo, titulo: r.titulo,
+    cuerpo: r.cuerpo || '', socioId: r.socio_id,
+    periodoInicio: r.periodo_inicio ? isoADmy(r.periodo_inicio) : '',
+    periodoFin: r.periodo_fin ? isoADmy(r.periodo_fin) : '',
+    datos: r.datos || {}, creadoPor: r.creado_por || '', creadoEn: r.creado_en
+  }));
+  (det && det.data ? det.data : []).forEach(r => MENSAJES_DETALLE.push({
+    mensajeId: r.mensaje_id, socioId: r.socio_id, datos: r.datos || {}
+  }));
+  (leidos && leidos.data ? leidos.data : []).forEach(r => MENSAJES_LEIDOS.push({
+    mensajeId: r.mensaje_id, perfilId: r.perfil_id, leidoEn: r.leido_en
+  }));
+}
+function detalleDeMensaje(mensajeId, socioId){
+  return MENSAJES_DETALLE.find(d => mismoId(d.mensajeId, mensajeId)
+                                 && mismoId(d.socioId, socioId));
+}
+function lecturasDe(mensajeId){
+  return MENSAJES_LEIDOS.filter(l => mismoId(l.mensajeId, mensajeId));
+}
+function loLei(mensajeId){
+  return MENSAJES_LEIDOS.some(l => mismoId(l.mensajeId, mensajeId)
+                               && l.perfilId === STATE.perfilId);
+}
+function mensajesParaMi(){
+  const socioId = STATE.socioId;
+  return MENSAJES.filter(m => m.socioId == null || mismoId(m.socioId, socioId));
+}
+function sinLeer(){ return mensajesParaMi().filter(m => !loLei(m.id)).length; }
 
 async function cargarAccesos(){
   ACCESOS.length = 0;
@@ -880,6 +942,7 @@ async function conGuardado(fn, mensajeOk){
     await fn();
     await cargarTodo();
     if(STATE.role === 'admin'){ await cargarAccesos(); await cargarBitacora(); }
+    await cargarMensajes();
     // El mensaje puede ser una función cuando depende del resultado, como el
     // consecutivo que asigna la base al guardar.
     const msg = typeof mensajeOk === 'function' ? mensajeOk() : mensajeOk;
@@ -1891,6 +1954,196 @@ async function entregarPdf(construir, nombre, etiqueta){
   }
   descargarBlobLocal(blob, nombre);
 }
+
+/* ---------- Bandeja: enviar y acusar recibo ---------- */
+async function enviarMensajeGeneral({titulo, cuerpo, socioId}){
+  const {data: numero, error: eNum} = await sb.rpc('siguiente_mensaje');
+  if(eNum){ toast(mensajeDeErrorSb(eNum)); return; }
+  await conGuardado(async () => {
+    const {error} = await sb.from('mensajes').insert({
+      numero, tipo:'general', titulo, cuerpo,
+      socio_id: socioId || null,
+      creado_por: (STATE.sesion && STATE.sesion.user ? STATE.sesion.user.email : '') || ''
+    });
+    if(error) throw error;
+  }, () => 'Mensaje ' + numero + ' enviado.');
+}
+
+/* El corte se guarda con las cifras adentro. Nunca se recalcula al abrirlo:
+   un estado de cuenta es una fotografía, y si cambia deja de servir. */
+async function enviarCorteMensual(anio, mes, nota){
+  const corte = calcularCorteMensual(anio, mes);
+  if(!corte.cuadre.cuadra){
+    toast('El corte no cuadra por ' + formatMoney(Math.abs(corte.cuadre.diferencia))
+          + '. No se envía hasta que se revise.');
+    return;
+  }
+  const {data: numero, error: eNum} = await sb.rpc('siguiente_corte');
+  if(eNum){ toast(mensajeDeErrorSb(eNum)); return; }
+
+  const {porSocio, ...grupo} = corte;
+  await conGuardado(async () => {
+    const {data, error} = await sb.from('mensajes').insert({
+      numero, tipo:'corte_mensual',
+      titulo: 'Corte de ' + corte.periodo.etiqueta,
+      cuerpo: nota || '',
+      periodo_inicio: dmyAIso(corte.periodo.desde),
+      periodo_fin: dmyAIso(corte.periodo.hasta),
+      datos: grupo,
+      creado_por: (STATE.sesion && STATE.sesion.user ? STATE.sesion.user.email : '') || ''
+    }).select('id').single();
+    if(error) throw error;
+
+    const filas = porSocio.map(l => ({mensaje_id: data.id, socio_id: l.socioId, datos: l}));
+    if(filas.length){
+      const {error: e2} = await sb.from('mensajes_detalle').insert(filas);
+      if(e2) throw e2;
+    }
+  }, () => 'Corte ' + numero + ' enviado a los socios.');
+}
+
+async function marcarLeido(mensajeId){
+  if(loLei(mensajeId)) return;
+  const {error} = await sb.from('mensajes_leidos')
+    .insert({mensaje_id: mensajeId, perfil_id: STATE.perfilId});
+  // Si ya estaba marcado, la llave primaria lo rechaza y da igual.
+  if(!error) MENSAJES_LEIDOS.push({mensajeId, perfilId: STATE.perfilId,
+                                   leidoEn: new Date().toISOString()});
+}
+
+
+/* El corte en papel. Sale de las cifras guardadas en el mensaje, igual que
+   la pantalla: el PDF de enero impreso en marzo dice lo mismo que en enero. */
+function construirPdfCorte(m, mio){
+  const g = m.datos || {};
+  const pageW = 612, pageH = 792, margen = 54;
+  const c = pdfLienzo(pageW, pageH, margen);
+  const VERDE = '0.05 0.37 0.24 rg', NEGRO = '0 0 0 rg', GRIS = '0.34 0.42 0.38 rg';
+
+  function titulo(txt){
+    c.asegurarEspacio(60); c.bajar(12);
+    c.ops.push(VERDE); c.texto(txt, 12, 'F2', margen); c.ops.push(NEGRO);
+    c.bajar(8);
+    c.ops.push('0.80 0.86 0.83 RG'); c.linea(); c.ops.push('0.05 0.37 0.24 RG');
+    c.bajar(15);
+  }
+  function fila(k, v, fuerte){
+    c.asegurarEspacio(16);
+    c.texto(k, 9.5, fuerte ? 'F2' : 'F1', margen);
+    c.textoDerecha(v, 9.5, 'F2', pageW - margen);
+    c.bajar(15);
+  }
+
+  c.logo(28); c.bajar(60);
+  c.ops.push(VERDE); c.texto(m.titulo, 20, 'F2', margen); c.ops.push(NEGRO);
+  c.bajar(18);
+  c.ops.push(GRIS);
+  c.texto(m.numero + '  ·  del ' + (g.periodo ? g.periodo.desde : '') +
+          ' al ' + (g.periodo ? g.periodo.hasta : ''), 9, 'F1', margen);
+  c.ops.push(NEGRO); c.bajar(20);
+
+  if(m.cuerpo){
+    pdfEnvolver(m.cuerpo, pageW - margen*2, 9.5).forEach(l => {
+      c.asegurarEspacio(14); c.texto(l, 9.5, 'F1', margen); c.bajar(13);
+    });
+    c.bajar(8);
+  }
+
+  if(g.cartera){
+    titulo('LA CARTERA AL ' + g.periodo.hasta);
+    fila('Por cobrar', pdfMoney(g.cartera.bruta));
+    fila('De eso, vencido', pdfMoney(g.cartera.vencida) + '  ('
+         + (100*g.cartera.enRiesgo).toFixed(1) + '%)');
+    fila('Reserva sugerida por incobrables', '- ' + pdfMoney(g.cartera.provision));
+    fila('Cartera neta', pdfMoney(g.cartera.neta), true);
+    fila('Prestamos vigentes / vencidos / cancelados',
+         g.cartera.vigentes + ' / ' + g.cartera.vencidos + ' / ' + g.cartera.cancelados);
+
+    titulo('ANTIGUEDAD DE LO QUE FALTA COBRAR');
+    (g.cartera.tramos || []).forEach(t => {
+      if(!t.saldo) return;
+      fila(t.etiqueta + '  (reserva ' + Math.round(t.tasa*100) + '%)',
+           pdfMoney(t.saldo) + '  ·  ' + t.prestamos + ' prest.');
+    });
+  }
+
+  if(g.mes){
+    titulo('EL MES');
+    fila('Prestamos nuevos', String(g.mes.prestamosNuevos));
+    fila('Capital colocado', pdfMoney(g.mes.colocado));
+    fila('Cobrado', pdfMoney(g.mes.cobrado));
+    fila('Rebajas por pronto pago', '- ' + pdfMoney(g.mes.rebajas));
+    fila('Interes cobrado en el mes', pdfMoney(g.mes.interesCobrado), true);
+  }
+
+  if(g.acumulado && g.utilidad){
+    titulo('DESDE QUE ARRANCO EL PERIODO');
+    fila('Capital colocado', pdfMoney(g.acumulado.colocado));
+    fila('Cobrado', pdfMoney(g.acumulado.cobrado));
+    fila('Interes cobrado', pdfMoney(g.acumulado.interesCobrado));
+    fila('Rebajas otorgadas', '- ' + pdfMoney(g.acumulado.rebajas));
+    fila('Reserva por incobrables', '- ' + pdfMoney(g.utilidad.provision));
+    fila('Utilidad prudente', pdfMoney(g.utilidad.prudenteAcum), true);
+    fila('Le toca a cada socio', pdfMoney(g.utilidad.porSocio), true);
+    c.bajar(4);
+    pdfEnvolver('Utilidad cobrada, no pactada: cada abono repone primero el '
+      + 'capital prestado, y solo lo que entra por encima cuenta como ganancia. '
+      + 'Se reparte en partes iguales entre los ' + (g.utilidad.socios || 0)
+      + ' socios, venga de la cartera que venga.',
+      pageW - margen*2, 8).forEach(l => {
+        c.asegurarEspacio(12); c.ops.push(GRIS);
+        c.texto(l, 8, 'F1', margen); c.ops.push(NEGRO); c.bajar(11);
+      });
+  }
+
+  if(mio){
+    titulo('TU CARTERA');
+    fila('Prestamos a tu nombre', String(mio.prestamos));
+    fila('Por cobrar', pdfMoney(mio.saldo));
+    fila('De eso, vencido', pdfMoney(mio.saldoVencido));
+    fila('Cobraste en el mes', pdfMoney(mio.cobradoMes));
+    fila('Interes que aporto tu cartera', pdfMoney(mio.interesCobradoAcum));
+    fila('Tu capital inicial', pdfMoney(mio.capitalInicial));
+    if(g.utilidad) fila('Tu parte de la utilidad', pdfMoney(g.utilidad.porSocio), true);
+    c.bajar(4);
+    pdfEnvolver('Lo que aporto tu cartera no es lo que ganas. Los intereses '
+      + 'son del grupo y se parten en partes iguales; esta cifra dice cuanto '
+      + 'entro por los prestamos que vos llevas, no cuanto te toca.',
+      pageW - margen*2, 8).forEach(l => {
+        c.asegurarEspacio(12); c.ops.push(GRIS);
+        c.texto(l, 8, 'F1', margen); c.ops.push(NEGRO); c.bajar(11);
+      });
+  }
+
+  if(g.cuadre){
+    c.bajar(10);
+    c.asegurarEspacio(30);
+    c.ops.push(g.cuadre.cuadra ? GRIS : '0.72 0.11 0.11 rg');
+    pdfEnvolver(g.cuadre.cuadra
+      ? 'Las cuentas cuadran: caja mas cartera da exactamente el capital mas '
+        + 'los intereses pactados mas la mora, menos las rebajas.'
+      : 'ATENCION: las cuentas no cuadran por ' + pdfMoney(Math.abs(g.cuadre.diferencia)) + '.',
+      pageW - margen*2, 8.5).forEach(l => {
+        c.asegurarEspacio(12); c.texto(l, 8.5, 'F1', margen); c.bajar(11);
+      });
+    c.ops.push(NEGRO);
+  }
+
+  c.firmas('Administracion de Lazos', 'Recibido por el socio');
+  return c.build();
+}
+
+function abrirPdfCorte(id){
+  const m = MENSAJES.find(x => mismoId(x.id, id));
+  if(!m) return;
+  const det = detalleDeMensaje(m.id, STATE.socioId);
+  return entregarPdf(
+    () => construirPdfCorte(m, det ? det.datos : null),
+    'Corte_' + m.numero + '.pdf',
+    'el corte ' + m.numero
+  );
+}
+
 function abrirPdfRecibo(numero, reimpresion){
   const r = RECIBOS.find(x=>x.numero===numero);
   if(!r) return;
@@ -1908,6 +2161,425 @@ function abrirPdfCierre(numero, reimpresion){
     'Cierre_de_caja_' + ci.numero + (reimpresion ? '_reimpresion' : '') + '.pdf',
     'cierre ' + ci.numero
   );
+}
+
+
+/* =========================================================
+   CORTE MENSUAL
+   Lo que el administrador les manda a los socios cada mes.
+
+   Dos decisiones de fondo, porque cambian los números:
+
+   1. El interés se cobra DE ÚLTIMO. Cada abono repone primero el capital
+      prestado; solo lo que entra por encima de eso es ganancia. Es la
+      lectura prudente: no hay utilidad hasta que el dinero propio volvió.
+      La otra convención (repartir cada abono entre capital e interés) da
+      utilidad más temprano, y esa utilidad todavía está en la calle.
+
+   2. Se reporta lo COBRADO, no lo pactado. Los intereses pactados de un
+      préstamo vigente no son utilidad: son una promesa. Se muestran aparte,
+      como lo que se sembró en el mes.
+   ========================================================= */
+
+/* Escala de provisión por antigüedad del atraso. Cuanto más viejo es un
+   vencido, menos probable es cobrarlo; reservar contra eso es lo que evita
+   repartir plata que no va a llegar. */
+const ESCALA_PROVISION = [
+  {hasta: 0,    tasa: 0,    etiqueta: 'Al día'},
+  {hasta: 30,   tasa: 0.10, etiqueta: '1 a 30 días'},
+  {hasta: 90,   tasa: 0.25, etiqueta: '31 a 90 días'},
+  {hasta: 180,  tasa: 0.50, etiqueta: '91 a 180 días'},
+  {hasta: 1e9,  tasa: 1.00, etiqueta: 'Más de 180 días'}
+];
+function tramoProvision(diasAtraso){
+  return ESCALA_PROVISION.find(t => diasAtraso <= t.hasta) || ESCALA_PROVISION[ESCALA_PROVISION.length-1];
+}
+
+function enRango(fechaDmy, desde, hasta){
+  if(!fechaDmy) return false;
+  const f = parseDMY(fechaDmy);
+  return f >= desde && f <= hasta;
+}
+function movsAprobadosHasta(prestamoId, hasta){
+  return MOVS.filter(m => mismoId(m.prestamoId, prestamoId)
+    && (m.estado === 'aprobado' || m.estado === 'aprobado_caja')
+    && m.tipo !== 'reversa'
+    && parseDMY(m.fecha) <= hasta);
+}
+/* Interés y mora efectivamente cobrados de un préstamo hasta una fecha:
+   todo lo que entró por encima del capital prestado. */
+function interesCobradoHasta(p, hasta){
+  const entrado = movsAprobadosHasta(p.id, hasta).reduce((a,m) => a + m.monto, 0);
+  return Math.max(0, entrado - p.monto);
+}
+function moraAplicadaHasta(prestamoId, hasta){
+  return MORAS.filter(m => mismoId(m.prestamoId, prestamoId) && !m.anulado
+      && parseDMY(m.fecha) <= hasta)
+    .reduce((a,m) => a + m.monto, 0);
+}
+/* Saldo del préstamo a una fecha pasada, sin el tope en cero: el cuadre
+   necesita el número crudo. Un saldo negativo es un sobrepago, y eso hay
+   que verlo, no esconderlo. */
+function saldoCrudoHasta(p, hasta){
+  const movs = movsAprobadosHasta(p.id, hasta);
+  const cobrado = movs.reduce((a,m) => a + m.monto, 0);
+  const rebajas = movs.reduce((a,m) => a + (m.rebajaAplicada || 0), 0);
+  return p.monto + p.intereses + moraAplicadaHasta(p.id, hasta) - cobrado - rebajas;
+}
+
+function calcularCorteMensual(anio, mes){
+  const desde = new Date(anio, mes - 1, 1);
+  const hasta = new Date(anio, mes, 0);           // último día del mes
+  const vispera = new Date(anio, mes - 1, 0);     // último día del mes anterior
+
+  const vivos = SEED.prestamos.filter(p => parseDMY(p.fecha) <= hasta);
+
+  let colocado = 0, interesPactadoNuevo = 0, prestamosNuevos = 0;
+  vivos.forEach(p => {
+    if(!enRango(p.fecha, desde, hasta)) return;
+    prestamosNuevos++;
+    colocado += p.monto;
+    interesPactadoNuevo += p.intereses;
+  });
+
+  let cobradoMes = 0, rebajasMes = 0;
+  MOVS.forEach(m => {
+    if(m.estado !== 'aprobado' && m.estado !== 'aprobado_caja') return;
+    if(m.tipo === 'reversa') return;
+    if(!enRango(m.fecha, desde, hasta)) return;
+    cobradoMes += m.monto;
+    rebajasMes += (m.rebajaAplicada || 0);
+  });
+  const moraMes = MORAS
+    .filter(m => !m.anulado && enRango(m.fecha, desde, hasta))
+    .reduce((a,m) => a + m.monto, 0);
+
+  // Utilidad del mes: lo que el interés cobrado creció entre el cierre
+  // anterior y este. Nada de prorrateos.
+  let interesCobradoMes = 0, interesCobradoAcum = 0;
+  vivos.forEach(p => {
+    const alCierre = interesCobradoHasta(p, hasta);
+    interesCobradoAcum += alCierre;
+    interesCobradoMes += alCierre - interesCobradoHasta(p, vispera);
+  });
+
+  // Cartera al cierre, con su antigüedad.
+  const tramos = ESCALA_PROVISION.map(t => ({etiqueta: t.etiqueta, tasa: t.tasa, saldo: 0, prestamos: 0}));
+  let carteraBruta = 0, carteraCruda = 0, sobrepagos = 0;
+  let saldoVencido = 0, vigentes = 0, vencidos = 0, cancelados = 0, provision = 0;
+  const porSocio = {};
+  SEED.socios.forEach(so => { porSocio[so.nombre] = {
+    socio: so.nombre, socioId: so.id, capitalInicial: so.capital,
+    prestamos: 0, saldo: 0, saldoVencido: 0, colocadoMes: 0,
+    cobradoMes: 0, interesCobradoMes: 0, interesCobradoAcum: 0, provision: 0
+  }; });
+
+  vivos.forEach(p => {
+    const crudo = saldoCrudoHasta(p, hasta);
+    const saldo = Math.max(0, Math.round(crudo));
+    carteraCruda += crudo;
+    if(crudo < 0) sobrepagos += -crudo;
+    const linea = porSocio[p.socio];
+
+    if(saldo <= 0){ cancelados++; }
+    else {
+      carteraBruta += saldo;
+      const atraso = Math.max(0, daysBetween(parseDMY(p.vencimiento), hasta));
+      const vencido = parseDMY(p.vencimiento) < hasta;
+      if(vencido){ vencidos++; saldoVencido += saldo; } else { vigentes++; }
+      const t = tramoProvision(vencido ? atraso : 0);
+      const fila = tramos.find(x => x.etiqueta === t.etiqueta);
+      fila.saldo += saldo; fila.prestamos++;
+      const reserva = Math.round(saldo * t.tasa);
+      provision += reserva;
+      if(linea){ linea.saldo += saldo; linea.provision += reserva;
+                 if(vencido) linea.saldoVencido += saldo; }
+    }
+    if(linea){
+      linea.prestamos++;
+      if(enRango(p.fecha, desde, hasta)) linea.colocadoMes += p.monto;
+      const alCierre = interesCobradoHasta(p, hasta);
+      linea.interesCobradoAcum += alCierre;
+      linea.interesCobradoMes += alCierre - interesCobradoHasta(p, vispera);
+      movsAprobadosHasta(p.id, hasta).forEach(m => {
+        if(enRango(m.fecha, desde, hasta)) linea.cobradoMes += m.monto;
+      });
+    }
+  });
+
+  /* El cuadre. Esta igualdad se cumple siempre, sin importar cómo se repartan
+     los abonos entre capital e interés:
+
+       caja + cartera  =  capital inicial + intereses pactados + mora − rebajas
+
+     Si los dos lados no dan lo mismo, algo le pasó a los datos. Es la
+     comprobación que habría gritado al día siguiente del borrado. */
+  const capitalInicial = capitalInicialTotal();
+  const desembolsadoAcum = vivos.reduce((a,p) => a + p.monto, 0);
+  const cobradoAcum = vivos.reduce((a,p) =>
+    a + movsAprobadosHasta(p.id, hasta).reduce((b,m) => b + m.monto, 0), 0);
+  const rebajasAcum = vivos.reduce((a,p) =>
+    a + movsAprobadosHasta(p.id, hasta).reduce((b,m) => b + (m.rebajaAplicada||0), 0), 0);
+  const interesPactadoAcum = vivos.reduce((a,p) => a + p.intereses, 0);
+  const moraAcum = vivos.reduce((a,p) => a + moraAplicadaHasta(p.id, hasta), 0);
+
+  const caja = capitalInicial + cobradoAcum - desembolsadoAcum;
+  const izquierda = Math.round(caja + carteraCruda);
+  const derecha = Math.round(capitalInicial + interesPactadoAcum + moraAcum - rebajasAcum);
+
+  return {
+    version: 1,
+    periodo: {anio, mes, desde: formatDMY(desde), hasta: formatDMY(hasta),
+              etiqueta: NOMBRE_MES[mes-1] + ' ' + anio},
+    mes: {prestamosNuevos, colocado, interesPactadoNuevo,
+          cobrado: Math.round(cobradoMes), rebajas: Math.round(rebajasMes),
+          mora: Math.round(moraMes), interesCobrado: Math.round(interesCobradoMes)},
+    acumulado: {colocado: desembolsadoAcum, cobrado: Math.round(cobradoAcum),
+                rebajas: Math.round(rebajasAcum), mora: Math.round(moraAcum),
+                interesPactado: interesPactadoAcum,
+                interesCobrado: Math.round(interesCobradoAcum)},
+    cartera: {bruta: Math.round(carteraBruta), vencida: Math.round(saldoVencido),
+              vigentes, vencidos, cancelados,
+              enRiesgo: carteraBruta > 0 ? saldoVencido / carteraBruta : 0,
+              provision: Math.round(provision),
+              neta: Math.round(carteraBruta - provision),
+              tramos: tramos.map(t => ({...t, saldo: Math.round(t.saldo)}))},
+    tesoreria: {caja: Math.round(caja), capitalInicial,
+                sobrepagos: Math.round(sobrepagos)},
+    utilidad: {realizadaMes: Math.round(interesCobradoMes),
+               realizadaAcum: Math.round(interesCobradoAcum),
+               provision: Math.round(provision),
+               prudenteAcum: Math.round(interesCobradoAcum - provision),
+               /* La utilidad es de todos por partes iguales, sin importar de
+                  qué cartera salió el interés. Cada socio responde por sus
+                  préstamos, pero nadie gana más que otro por eso. */
+               socios: SEED.socios.length,
+               porSocio: SEED.socios.length
+                 ? Math.round((interesCobradoAcum - provision) / SEED.socios.length) : 0},
+    cuadre: {izquierda, derecha, diferencia: izquierda - derecha, cuadra: izquierda === derecha},
+    porSocio: Object.values(porSocio).map(l => ({
+      ...l,
+      saldo: Math.round(l.saldo), saldoVencido: Math.round(l.saldoVencido),
+      cobradoMes: Math.round(l.cobradoMes),
+      interesCobradoMes: Math.round(l.interesCobradoMes),
+      interesCobradoAcum: Math.round(l.interesCobradoAcum),
+      provision: Math.round(l.provision)
+    }))
+  };
+}
+const NOMBRE_MES = ['enero','febrero','marzo','abril','mayo','junio','julio',
+                    'agosto','setiembre','octubre','noviembre','diciembre'];
+
+
+/* =========================================================
+   BANDEJA
+   ========================================================= */
+function pillTipoMensaje(m){
+  return m.tipo === 'corte_mensual'
+    ? '<span class="pill pill-vigente">Corte mensual</span>'
+    : '<span class="pill pill-pendiente">Aviso</span>';
+}
+function fechaDeMensaje(m){
+  const d = new Date(m.creadoEn);
+  return isNaN(d) ? '' : formatDMY(d);
+}
+
+/* Las cifras salen del mensaje guardado, nunca de un cálculo nuevo. */
+function renderCifrasCorte(g, mio){
+  if(!g || !g.cartera) return '<div class="empty">Este corte no trae cifras.</div>';
+  const pct = (100 * (g.cartera.enRiesgo || 0)).toFixed(1) + '%';
+  const riesgoAlto = (g.cartera.enRiesgo || 0) >= 0.15;
+  return `
+    ${riesgoAlto ? `<div class="notice warn"><b>Cartera en riesgo: ${pct}.</b>
+      De cada cien colones por cobrar, ${Math.round(100*g.cartera.enRiesgo)} están vencidos.
+      Es la cifra que manda en este negocio: cobrar pesa más que la tasa.</div>` : ''}
+
+    <h3>La cartera al ${g.periodo.hasta}</h3>
+    <div class="cifras">
+      <div class=""><span class="k">Por cobrar</span><span class="v">${formatMoney(g.cartera.bruta)}</span></div>
+      <div class=""><span class="k">De eso, vencido</span><span class="v">${formatMoney(g.cartera.vencida)} · ${pct}</span></div>
+      <div class=""><span class="k">Reserva sugerida</span><span class="v">− ${formatMoney(g.cartera.provision)}</span></div>
+      <div class="fuerte"><span class="k">Cartera neta</span><span class="v">${formatMoney(g.cartera.neta)}</span></div>
+      </div>
+
+    <h3>El mes</h3>
+    <div class="cifras">
+      <div class=""><span class="k">Préstamos nuevos</span><span class="v">${g.mes.prestamosNuevos}</span></div>
+      <div class=""><span class="k">Capital colocado</span><span class="v">${formatMoney(g.mes.colocado)}</span></div>
+      <div class=""><span class="k">Cobrado</span><span class="v">${formatMoney(g.mes.cobrado)}</span></div>
+      <div class=""><span class="k">Rebajas por pronto pago</span><span class="v">− ${formatMoney(g.mes.rebajas)}</span></div>
+      <div class="fuerte"><span class="k">Interés cobrado en el mes</span><span class="v">${formatMoney(g.mes.interesCobrado)}</span></div>
+      </div>
+
+    <h3>Desde que arrancó el periodo</h3>
+    <div class="cifras">
+      <div class=""><span class="k">Interés cobrado</span><span class="v">${formatMoney(g.acumulado.interesCobrado)}</span></div>
+      <div class=""><span class="k">Rebajas otorgadas</span><span class="v">− ${formatMoney(g.acumulado.rebajas)}</span></div>
+      <div class=""><span class="k">Reserva por incobrables</span><span class="v">− ${formatMoney(g.utilidad.provision)}</span></div>
+      <div class="fuerte"><span class="k">Utilidad prudente</span><span class="v">${formatMoney(g.utilidad.prudenteAcum)}</span></div>
+      </div>
+    <p class="muted" style="font-size:12.5px;">
+      Utilidad <b>cobrada</b>, no pactada: cada abono repone primero el capital
+      prestado, y solo lo que entra por encima cuenta como ganancia.
+      Se reparte <b>en partes iguales entre los ${g.utilidad.socios || 0} socios</b>,
+      venga de la cartera que venga.
+    </p>
+
+    ${mio ? `
+      <h3>Tu cartera</h3>
+      <div class="cifras">
+      <div class=""><span class="k">Préstamos a tu nombre</span><span class="v">${mio.prestamos}</span></div>
+      <div class=""><span class="k">Por cobrar</span><span class="v">${formatMoney(mio.saldo)}</span></div>
+      <div class=""><span class="k">De eso, vencido</span><span class="v">${formatMoney(mio.saldoVencido)}</span></div>
+      <div class=""><span class="k">Cobraste en el mes</span><span class="v">${formatMoney(mio.cobradoMes)}</span></div>
+      <div class=""><span class="k">Interés que aportó tu cartera</span><span class="v">${formatMoney(mio.interesCobradoAcum)}</span></div>
+      <div class=""><span class="k">Tu capital inicial</span><span class="v">${formatMoney(mio.capitalInicial)}</span></div>
+      <div class="fuerte"><span class="k">Tu parte de la utilidad</span><span class="v">${formatMoney(g.utilidad.porSocio)}</span></div>
+      </div>
+      <p class="muted" style="font-size:12.5px;">
+        Lo que aportó tu cartera no es lo que ganás. Los intereses son del
+        grupo y se parten en partes iguales; esta cifra dice cuánto entró por
+        los préstamos que vos llevás, no cuánto te toca.
+      </p>` : ''}
+
+    <div class="notice ${g.cuadre.cuadra ? '' : 'warn'}" style="margin-top:12px;">
+      ${g.cuadre.cuadra
+        ? 'Las cuentas cuadran: caja más cartera da exactamente el capital más los intereses menos las rebajas.'
+        : '<b>Atención:</b> las cuentas no cuadran por ' + formatMoney(Math.abs(g.cuadre.diferencia)) + '.'}
+    </div>`;
+}
+
+function renderBandeja(){
+  const mios = mensajesParaMi();
+  return `
+  <div class="card">
+    <h2>Bandeja</h2>
+    <p class="muted">Lo que manda la administración de Lazos.</p>
+    ${mios.length === 0 ? '<div class="empty">Todavía no hay mensajes.</div>' : ''}
+    ${mios.map(m => {
+      const nuevo = !loLei(m.id);
+      return `<div class="acceso-item" style="${nuevo ? 'border-left:3px solid var(--verde);' : ''}">
+        <div class="acceso-top">
+          <div>
+            <div class="acceso-nombre">${m.titulo}${nuevo ? ' <span class="pill pill-pendiente">Nuevo</span>' : ''}</div>
+            <div class="muted" style="font-size:12.5px;">${[m.numero, fechaDeMensaje(m)].filter(Boolean).join(' · ')}</div>
+          </div>
+          ${pillTipoMensaje(m)}
+        </div>
+        <div class="acceso-botones no-print">
+          <button class="btn btn-primary btn-sm" data-action="abrir-mensaje" data-id="${m.id}">
+            ${m.tipo === 'corte_mensual' ? 'Ver el corte' : 'Leer'}
+          </button>
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+function renderMensajeAbierto(id){
+  const m = MENSAJES.find(x => mismoId(x.id, id));
+  if(!m) return '<div class="card"><div class="empty">Ese mensaje ya no está.</div></div>';
+  const det = detalleDeMensaje(m.id, STATE.socioId);
+  return `
+  <div class="card">
+    <button class="btn btn-ghost btn-sm no-print" data-action="goto" data-screen="bandeja">← Volver a la bandeja</button>
+    <h2 style="margin-top:10px;">${m.titulo}</h2>
+    <p class="muted">${[m.numero, fechaDeMensaje(m), m.creadoPor].filter(Boolean).join(' · ')}</p>
+    ${m.cuerpo ? `<p style="white-space:pre-wrap;">${m.cuerpo}</p>` : ''}
+    ${m.tipo === 'corte_mensual' ? renderCifrasCorte(m.datos, det ? det.datos : null) : ''}
+    ${m.tipo === 'corte_mensual' ? `<button class="btn btn-ghost btn-sm no-print" style="margin-top:14px;"
+        data-action="pdf-corte" data-id="${m.id}">Descargar el corte en PDF</button>` : ''}
+  </div>`;
+}
+
+/* ---------- lado del administrador ---------- */
+function renderMensajesAdmin(){
+  const hoy = todayCutoff();
+  const anio = STATE.corteAnio || hoy.getFullYear();
+  const mes  = STATE.corteMes  || (hoy.getMonth() + 1);
+  const previa = STATE.cortePrevia ? calcularCorteMensual(anio, mes) : null;
+
+  return `
+  <div class="card">
+    <h2>Corte mensual</h2>
+    <p class="muted">Las cifras se congelan al enviarlo: el socio que lo abra en marzo
+      va a ver exactamente lo mismo que vio en enero.</p>
+    <div class="grid cols-2">
+      <div class="field">
+        <label for="corte-mes">Mes</label>
+        <select id="corte-mes">
+          ${NOMBRE_MES.map((n,i)=>`<option value="${i+1}" ${i+1===mes?'selected':''}>${n}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label for="corte-anio">Año</label>
+        <input type="number" id="corte-anio" value="${anio}" min="2024" max="2100">
+      </div>
+    </div>
+    <div class="field">
+      <label for="corte-nota">Nota para los socios (opcional)</label>
+      <textarea id="corte-nota" placeholder="Ej: este mes bajó el cobro por las fiestas.">${STATE.corteNota||''}</textarea>
+    </div>
+    <button class="btn btn-ghost btn-block" data-action="previa-corte">Ver el borrador</button>
+
+    ${previa ? `
+      <div style="margin-top:16px;">
+        ${renderCifrasCorte(previa, null)}
+        <h3>Cómo queda cada socio</h3>
+        <div class="tabla-scroll"><div class="cifras">
+      </div></div>
+        <button class="btn btn-primary btn-block" style="margin-top:14px;"
+          data-action="enviar-corte" ${previa.cuadre.cuadra?'':'disabled'}>
+          ${previa.cuadre.cuadra ? 'Enviar este corte a los socios' : 'No se puede enviar: las cuentas no cuadran'}
+        </button>
+      </div>` : ''}
+  </div>
+
+  <div class="card">
+    <h3>Mandar un aviso</h3>
+    <form id="form-mensaje">
+      <div class="field">
+        <label for="msg-titulo">Título</label>
+        <input type="text" id="msg-titulo" name="titulo" required placeholder="Ej: Reunión del sábado">
+      </div>
+      <div class="field">
+        <label for="msg-cuerpo">Mensaje</label>
+        <textarea id="msg-cuerpo" name="cuerpo" required placeholder="Lo que les querés decir."></textarea>
+      </div>
+      <div class="field">
+        <label for="msg-socio">Para</label>
+        <select id="msg-socio" name="socioId">
+          <option value="">Todos los socios</option>
+          ${SEED.socios.map(x=>`<option value="${x.id}">${x.nombre}</option>`).join('')}
+        </select>
+      </div>
+      <button type="submit" class="btn btn-primary btn-block">Enviar</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3>Enviados (${MENSAJES.length})</h3>
+    ${MENSAJES.length === 0 ? '<div class="empty">Todavía no has mandado nada.</div>' :
+      MENSAJES.map(m => {
+        const leyeron = lecturasDe(m.id).length;
+        const deben = m.socioId == null ? SEED.socios.length : 1;
+        return `<div class="acceso-item">
+          <div class="acceso-top">
+            <div>
+              <div class="acceso-nombre">${m.titulo}</div>
+              <div class="muted" style="font-size:12.5px;">${[m.numero, fechaDeMensaje(m)].filter(Boolean).join(' · ')}</div>
+            </div>
+            <span class="pill ${leyeron>=deben?'pill-cancelado':'pill-pendiente'}">
+              ${leyeron} de ${deben} lo leyeron
+            </span>
+          </div>
+          <div class="acceso-botones no-print">
+            <button class="btn btn-ghost btn-sm" data-action="abrir-mensaje" data-id="${m.id}">Ver</button>
+            ${m.tipo==='corte_mensual'?`<button class="btn btn-ghost btn-sm" data-action="pdf-corte" data-id="${m.id}">PDF</button>`:''}
+          </div>
+        </div>`;
+      }).join('')}
+  </div>`;
 }
 
 /* =========================================================
@@ -2395,9 +3067,9 @@ function renderHeader(){
 
 const ADMIN_TABS = [
   ['tablero','Tablero'], ['aprobar','Por aprobar'], ['registrarSocio','Registrar a nombre de socio'],
-  ['cierreCaja','Cierre de caja'], ['solicitudes','Solicitudes de préstamo'], ['tablas','Tablas'], ['vencidos','Vencidos'], ['accesos','Accesos'], ['config','Configuración']
+  ['cierreCaja','Cierre de caja'], ['solicitudes','Solicitudes de préstamo'], ['tablas','Tablas'], ['vencidos','Vencidos'], ['mensajes','Mensajes'], ['accesos','Accesos'], ['config','Configuración']
 ];
-const SOCIO_TABS = [ ['cartera','Mi cartera'], ['registrar','Registrar abono'], ['solicitar','Solicitar préstamo'] ];
+const SOCIO_TABS = [ ['cartera','Mi cartera'], ['registrar','Registrar abono'], ['solicitar','Solicitar préstamo'], ['bandeja','Bandeja'] ];
 
 function renderTabs(){
   const tabs = STATE.role==='admin' ? ADMIN_TABS : SOCIO_TABS;
@@ -2407,13 +3079,14 @@ function renderTabs(){
 }
 function renderBottomNav(){
   if(STATE.role!=='socio') return renderBottomNavAdmin();
-  const icons = {cartera:'📋', registrar:'➕', solicitar:'💵'};
+  const icons = {cartera:'📋', registrar:'➕', solicitar:'💵', bandeja:'✉️'};
+  const pendientes = sinLeer();
   return `<div class="bottom-nav no-print">
-    ${SOCIO_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}" data-action="goto" data-screen="${id}"><span class="ic">${icons[id]}</span>${label}</button>`).join('')}
+    ${SOCIO_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}" data-action="goto" data-screen="${id}"><span class="ic">${icons[id]}${id==='bandeja'&&pendientes?`<span class="globo">${pendientes}</span>`:''}</span>${label}</button>`).join('')}
   </div>`;
 }
 function renderBottomNavAdmin(){
-  const icons = {tablero:'📊', aprobar:'✅', registrarSocio:'➕', cierreCaja:'💰', solicitudes:'📥', tablas:'📑', vencidos:'⏰', accesos:'👤', config:'⚙️'};
+  const icons = {tablero:'📊', aprobar:'✅', registrarSocio:'➕', cierreCaja:'💰', solicitudes:'📥', tablas:'📑', vencidos:'⏰', mensajes:'✉️', accesos:'👤', config:'⚙️'};
   return `<div class="bottom-nav no-print">
     ${ADMIN_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}" data-action="goto" data-screen="${id}"><span class="ic">${icons[id]}</span></button>`).join('')}
   </div>`;
@@ -2425,6 +3098,8 @@ function renderScreen(){
     if(STATE.screen==='registrar') return renderRegistrarAbono(false);
     if(STATE.screen==='solicitar') return renderSolicitarPrestamo();
     if(STATE.screen==='detalle') return renderDetalle(STATE.screenParams.id, false);
+    if(STATE.screen==='bandeja') return renderBandeja();
+    if(STATE.screen==='mensaje') return renderMensajeAbierto(STATE.screenParams.id);
   } else {
     if(STATE.screen==='tablero') return renderTablero();
     if(STATE.screen==='aprobar') return renderPorAprobar();
@@ -2433,6 +3108,8 @@ function renderScreen(){
     if(STATE.screen==='solicitudes') return renderSolicitudesAdmin();
     if(STATE.screen==='tablas') return renderTablas();
     if(STATE.screen==='vencidos') return renderVencidos();
+    if(STATE.screen==='mensajes') return renderMensajesAdmin();
+    if(STATE.screen==='mensaje') return renderMensajeAbierto(STATE.screenParams.id);
     if(STATE.screen==='accesos') return renderAccesos();
     if(STATE.screen==='config') return renderConfig();
     if(STATE.screen==='detalle') return renderDetalle(STATE.screenParams.id, true);
@@ -3878,6 +4555,24 @@ document.addEventListener('click', async function(e){
   if(action==='abrir-rechazo-solicitud'){ STATE.modal = {type:'rechazo-solicitud', solId:t.dataset.sol}; render(); return; }
   if(action==='ver-imagen'){ STATE.modal = {type:'imagen', src:t.dataset.src}; render(); return; }
   if(action==='pdf-guia'){ abrirPdfGuia(); return; }
+  if(action==='abrir-mensaje'){
+    await marcarLeido(t.dataset.id);
+    STATE.screen = 'mensaje'; STATE.screenParams = {id: t.dataset.id};
+    render(); return;
+  }
+  if(action==='pdf-corte'){ abrirPdfCorte(t.dataset.id); return; }
+  if(action==='previa-corte'){
+    STATE.corteMes  = Number(document.getElementById('corte-mes').value);
+    STATE.corteAnio = Number(document.getElementById('corte-anio').value);
+    STATE.corteNota = document.getElementById('corte-nota').value;
+    STATE.cortePrevia = true;
+    render(); return;
+  }
+  if(action==='enviar-corte'){
+    await enviarCorteMensual(STATE.corteAnio, STATE.corteMes, STATE.corteNota||'');
+    STATE.cortePrevia = false; STATE.corteNota = '';
+    render(); return;
+  }
   if(action==='pdf-recibo'){ abrirPdfRecibo(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-cierre'){ abrirPdfCierre(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-reversa'){ abrirPdfReversa(t.dataset.mov); return; }
@@ -4523,6 +5218,16 @@ async function copiarAlPortapapeles(texto, mensajeOk){
 
 /* -------- formulario de accesos (administrador) -------- */
 document.addEventListener('submit', async function(e){
+  if(e.target.id !== 'form-mensaje') return;
+  e.preventDefault();
+  const titulo = document.getElementById('msg-titulo').value.trim();
+  const cuerpo = document.getElementById('msg-cuerpo').value.trim();
+  const socioId = document.getElementById('msg-socio').value;
+  if(!titulo || !cuerpo){ toast('Falta el título o el mensaje.'); return; }
+  await enviarMensajeGeneral({titulo, cuerpo, socioId: socioId ? Number(socioId) : null});
+});
+
+document.addEventListener('submit', async function(e){
   if(e.target.id !== 'form-acceso') return;
   e.preventDefault();
   const rol = document.getElementById('acc-rol').value;
@@ -4636,6 +5341,11 @@ async function entrar(sesion){
     ACCESOS.length = 0;
     BITACORA.length = 0;
   }
+  // La bandeja es de los dos, y tiene que estar al entrar: si solo se cargara
+  // al guardar algo, el socio entraría a una bandeja vacía.
+  STATE.socioId = perfil.socio_id;
+  STATE.perfilId = sesion.user.id;
+  try{ await cargarMensajes(); }catch(e){ /* sin la 0010 todavía, no estorba */ }
   const socio = SEED.socios.find(x => x.id === perfil.socio_id);
   STATE.socioActivo = socio ? socio.nombre : null;
 
