@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '3.3';
+const APP_VERSION = '3.4';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -2986,8 +2986,14 @@ function actualizarTotalesCaja(){
 /* Abonos ya aprobados que NO son efectivo (transferencia, Sinpe) y todavía no
    entraron en ningún cierre. Se registran en el cierre del día como respaldo,
    pero quedan fuera del arqueo porque no hay dinero físico que contar. */
+/* Lo que le falta a este cierre por transferencia o Sinpe. Los abonos de la
+   carga inicial quedan fuera: son de antes de que existiera la aplicación, no
+   pertenecen a ningún cierre, y ademas viven en la tabla `abonos`, asi que
+   marcarlos no funciona. Sin esta exclusion reaparecen en todos los cierres,
+   uno tras otro, para siempre. */
 function movsOtrosMetodosPendientesCierre(){
-  return MOVS.filter(m=> m.tipo==='abono' && m.estado==='aprobado' && m.reciboNumero && !m.cierreNumero);
+  return MOVS.filter(m=> m.tipo==='abono' && !m.historico
+                      && m.estado==='aprobado' && m.reciboNumero && !m.cierreNumero);
 }
 function detalleDesdeMov(mov, numeroRecibo){
   const p = prestamoById(mov.prestamoId);
@@ -3040,8 +3046,12 @@ async function registrarCierreCaja({recibos, otrosMovs, esperado, contado, desgl
   });
   if(error){ toast(mensajeDeErrorSb(error)); return null; }
 
-  // Marcar los movimientos para que no entren en dos cierres distintos.
-  const ids = recibos.map(r=>r.movId).concat(otrosMovs.map(m=>m.id)).filter(Boolean);
+  // Marcar los movimientos para que no entren en dos cierres distintos. Un
+  // id que empiece con 'H-' es de la carga inicial y no existe en esta tabla:
+  // intentar marcarlo no falla, simplemente no hace nada, y el movimiento
+  // volveria a aparecer en el cierre siguiente.
+  const ids = recibos.map(r=>r.movId).concat(otrosMovs.map(m=>m.id))
+    .filter(id => id && !String(id).startsWith('H-'));
   if(ids.length){
     await sb.from('movimientos').update({ cierre_numero: numero }).in('id', ids);
   }
