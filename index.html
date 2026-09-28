@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '3.2';
+const APP_VERSION = '3.3';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -1241,19 +1241,25 @@ function movimientoDeCajaDespues(desde, hasta){
 }
 /* El disponible a una fecha. Sin arqueo es la resta de siempre; con arqueo,
    lo contado más lo que se movió después. */
+/* Lo que daria la resta de siempre, sin mirar ningun arqueo: capital, mas
+   lo cobrado, menos lo desembolsado, los gastos y el interes arrastrado.
+   Sirve de dos maneras: es el disponible mientras no haya arqueo, y es
+   contra esto que se mide cuanto se desvio la realidad. */
+function disponibleReconstruido(hasta){
+  const inicio = new Date(1900, 0, 1);
+  const d = movimientoDeCajaDespues(inicio, hasta);
+  const ar = interesArrastradoPorBolsa(hasta);
+  const inicialEfectivo = CONFIG.saldoInicialEfectivo;
+  const inicialBancos = capitalInicialTotal() - inicialEfectivo;
+  return {efectivo: inicialEfectivo + d.efectivo - ar.efectivo,
+          bancos:   inicialBancos   + d.bancos   - ar.bancos};
+}
 function saldosDisponiblesHasta(hasta){
   const aq = ultimoArqueoHasta(hasta);
   if(!aq){
-    const ab = abonosConfirmadosPorBolsa();
-    const des = desembolsosPorBolsa();
-    const tr = traspasosPorBolsa();
-    const cg = costosDeCargosPorBolsa(null, hasta);
-    const ar = interesArrastradoPorBolsa(hasta);
-    const inicialEfectivo = CONFIG.saldoInicialEfectivo;
-    const inicialBancos = capitalInicialTotal() - inicialEfectivo;
-    const efectivo = inicialEfectivo + ab.efectivo - des.efectivo + tr.efectivo - cg.efectivo - ar.efectivo;
-    const bancos = inicialBancos + ab.bancos - des.bancos + tr.bancos - cg.bancos - ar.bancos;
-    return {efectivo, bancos, total: efectivo + bancos, arqueo: null};
+    const r = disponibleReconstruido(hasta);
+    return {efectivo: r.efectivo, bancos: r.bancos,
+            total: r.efectivo + r.bancos, arqueo: null};
   }
   const d = movimientoDeCajaDespues(parseDMY(aq.fecha), hasta);
   const efectivo = aq.efectivo + d.efectivo;
@@ -1263,10 +1269,18 @@ function saldosDisponiblesHasta(hasta){
 function saldosDisponibles(){ return saldosDisponiblesHasta(null); }
 /* Lo que los arqueos le sumaron o le quitaron al disponible. Es la plata que
    se movió sin pasar por un préstamo ni un abono, y el corte la muestra. */
+/* Cuanto se desvio la caja real de lo que decia la resta. Se calcula EN VIVO
+   contra el ultimo arqueo, no con el numero que se guardo aquel dia: si
+   despues se marca un prestamo como arrastre, o se anota un gasto viejo, ese
+   numero guardado queda mentiroso y el ajuste arrastraria el error.
+
+   Solo cuenta el ultimo arqueo, y no la suma de todos: cada uno vuelve a
+   fijar la caja desde cero, asi que el anterior ya quedo absorbido. */
 function ajustesDeArqueoHasta(hasta){
-  return ARQUEOS
-    .filter(a => !hasta || parseDMY(a.fecha) <= hasta)
-    .reduce((s, a) => s + (a.efectivo + a.bancos) - (a.efectivoCalculado + a.bancosCalculado), 0);
+  const aq = ultimoArqueoHasta(hasta);
+  if(!aq) return 0;
+  const r = disponibleReconstruido(parseDMY(aq.fecha));
+  return (aq.efectivo + aq.bancos) - (r.efectivo + r.bancos);
 }
 function disponiblePorMetodo(metodo){
   const s = saldosDisponibles();
