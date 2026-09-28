@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '2.8';
+const APP_VERSION = '2.9';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -1134,10 +1134,6 @@ function calcResumen(){
 }
 function capitalInicialTotal(){ return SEED.socios.reduce((s,x)=>s+x.capital,0); }
 function totalDesembolsado(){ return SEED.prestamos.reduce((s,p)=>s+p.monto,0); }
-function efectivoEsperado(){
-  const totalAbonadoTodos = SEED.prestamos.reduce((s,p)=>s+totalAbonadoConfirmado(p.id),0);
-  return capitalInicialTotal() + totalAbonadoTodos - totalDesembolsado();
-}
 
 /* ---------- Tesorería: efectivo en caja vs dinero en bancos ----------
    Sinpe Móvil y Transferencia mueven dinero bancario; Efectivo mueve caja.
@@ -3759,7 +3755,6 @@ function inputDateToDmy(iso){
 /* ---------- ADMIN: Tablero ---------- */
 function renderTablero(){
   const r = calcResumen();
-  const efec = efectivoEsperado();
   const saldos = saldosDisponibles();
   const porSocio = resumenPorSocio();
   return `
@@ -3778,13 +3773,19 @@ function renderTablero(){
     </div>
     <div class="grid cols-2" style="margin-top:12px;">
       <div class="stat"><div class="lbl">Capital prestado (préstamos no cancelados)</div><div class="num">${formatMoney(r.capitalNoCancelado)}</div></div>
-      <div class="stat accent"><div class="lbl">Disponible total</div><div class="num">${formatMoney(efec)}</div></div>
+      <div class="stat accent"><div class="lbl">Disponible total</div><div class="num">${formatMoney(saldos.total)}</div></div>
     </div>
     <div class="grid cols-2" style="margin-top:12px;">
       <div class="stat money-in"><div class="lbl">Disponible en efectivo (caja)</div><div class="num">${formatMoney(saldos.efectivo)}</div></div>
       <div class="stat money-in"><div class="lbl">Disponible en bancos (transferencia / Sinpe)</div><div class="num">${formatMoney(saldos.bancos)}</div></div>
     </div>
-    <p class="muted" style="margin-top:6px;">Disponible = capital inicial de socios + abonos cobrados − préstamos desembolsados. Se separa en caja y bancos según el método de cada movimiento, para saber por cuál vía se puede desembolsar.</p>
+    <p class="muted" style="margin-top:6px;">${saldos.arqueo
+      ? 'Disponible = lo que se contó en el arqueo <b>' + saldos.arqueo.numero + '</b> del '
+        + saldos.arqueo.fecha + ', más lo que se movió después. Se separa en caja y bancos '
+        + 'para saber por cuál vía se puede desembolsar.'
+      : 'Disponible = capital inicial de socios + abonos cobrados − préstamos desembolsados '
+        + '− gastos. Se separa en caja y bancos según el método de cada movimiento, para saber '
+        + 'por cuál vía se puede desembolsar.'}</p>
   </div>
   <div class="card">
     <h3>Por socio responsable</h3>
@@ -4272,7 +4273,7 @@ function renderTablaResumen(){
       <tr><td>Total abonado hasta hoy</td><td>${formatMoney(r.totalAbonadoHoy)}</td></tr>
       <tr><td>Disponible en efectivo (caja)</td><td>${formatMoney(saldosDisponibles().efectivo)}</td></tr>
       <tr><td>Disponible en bancos (transferencia / Sinpe)</td><td>${formatMoney(saldosDisponibles().bancos)}</td></tr>
-      <tr><td>Disponible total</td><td>${formatMoney(efectivoEsperado())}</td></tr>
+      <tr><td>Disponible total</td><td>${formatMoney(saldosDisponibles().total)}</td></tr>
     </tbody></table></div>
     <h3 style="margin-top:16px;">Por socio responsable</h3>
     <div class="table-wrap"><table>
