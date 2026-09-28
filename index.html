@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '2.6';
+const APP_VERSION = '2.7';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -471,6 +471,8 @@ const BITACORA = [];
 const MORAS = [];
 /* Plata movida entre caja y bancos. No cambia el disponible total. */
 const TRASPASOS = [];
+/* La cuenta de la realidad: lo que HAY, contado. Ancla el disponible. */
+const ARQUEOS = [];
 const RECIBOS = [];
 const CIERRES = [];
 /* Denominaciones de colon costarricense en circulacion, de mayor a menor. */
@@ -705,7 +707,7 @@ function filaASolicitud(r, nombrePorSocioId){
    costo es minimo, y evita que la pantalla muestre algo distinto de lo
    que quedo guardado. */
 async function cargarTodo(){
-  const [socios, prestamos, abonos, movs, recibos, cierres, sols, cfg, moras, traspasos] = await Promise.all([
+  const [socios, prestamos, abonos, movs, recibos, cierres, sols, cfg, moras, traspasos, arqueos] = await Promise.all([
     sb.from('socios').select('id, nombre, capital_inicial').order('nombre'),
     sb.from('prestamos').select('*'),
     sb.from('abonos').select('*'),
@@ -715,7 +717,8 @@ async function cargarTodo(){
     sb.from('solicitudes').select('*').order('orden'),
     sb.from('config').select('*').maybeSingle(),
     sb.from('cargos_mora').select('*').order('numero'),
-    sb.from('traspasos').select('*').order('numero')
+    sb.from('traspasos').select('*').order('numero'),
+    sb.from('arqueos').select('*').order('fecha').order('id')
   ]);
 
   // Sin la migración 0008 estas dos tablas no existen; que falten no debe
@@ -724,6 +727,14 @@ async function cargarTodo(){
   (moras && moras.data ? moras.data : []).forEach(r => MORAS.push(filaAMora(r)));
   TRASPASOS.length = 0;
   (traspasos && traspasos.data ? traspasos.data : []).forEach(r => TRASPASOS.push(filaATraspaso(r)));
+  ARQUEOS.length = 0;
+  (arqueos && arqueos.data ? arqueos.data : []).forEach(r => ARQUEOS.push({
+    id: r.id, numero: r.numero, fecha: isoADmy(r.fecha),
+    efectivo: Number(r.efectivo), bancos: Number(r.bancos),
+    efectivoCalculado: Number(r.efectivo_calculado || 0),
+    bancosCalculado: Number(r.bancos_calculado || 0),
+    motivo: r.motivo || '', hechoPor: r.hecho_por || ''
+  }));
 
   const error = [socios, prestamos, abonos, movs, recibos, cierres, sols, cfg]
     .map(r => r.error).find(Boolean);
@@ -809,7 +820,7 @@ function nuevoCodigoRegistro(){
 /* Todo lo que la sesión trajo consigo, para soltarlo al salir. */
 function olvidarDatos(){
   [SEED.socios, SEED.prestamos, SEED.abonos, MOVS, RECIBOS, CIERRES,
-   SOLICITUDES, ACCESOS, BITACORA, MORAS, TRASPASOS,
+   SOLICITUDES, ACCESOS, BITACORA, MORAS, TRASPASOS, ARQUEOS,
    MENSAJES, MENSAJES_DETALLE, MENSAJES_LEIDOS].forEach(a => { a.length = 0; });
   STATE.socioId = null; STATE.perfilId = null;
 }
@@ -1139,15 +1150,66 @@ function traspasosPorBolsa(){
   return {efectivo, bancos};
 }
 
-function saldosDisponibles(){
-  const ab = abonosConfirmadosPorBolsa();
-  const des = desembolsosPorBolsa();
-  const tr = traspasosPorBolsa();
-  const inicialEfectivo = CONFIG.saldoInicialEfectivo;
-  const inicialBancos = capitalInicialTotal() - inicialEfectivo;
-  const efectivo = inicialEfectivo + ab.efectivo - des.efectivo + tr.efectivo;
-  const bancos = inicialBancos + ab.bancos - des.bancos + tr.bancos;
-  return {efectivo, bancos, total: efectivo + bancos};
+/* ---------- El arqueo: la cuenta de la realidad ----------
+   Restar desembolsos a los abonos supone que toda la plata se movió por un
+   préstamo o un abono. No es cierto: hay retiros de utilidad, gastos, y
+   cobros que se hicieron sin anotar. El arqueo ancla el disponible a lo que
+   de verdad hay, y desde su fecha se cuenta desde ahí. */
+function ultimoArqueoHasta(hasta){
+  const candidatos = ARQUEOS.filter(a => !hasta || parseDMY(a.fecha) <= hasta);
+  if(!candidatos.length) return null;
+  return candidatos.slice().sort((a, b) => {
+    const d = parseDMY(a.fecha) - parseDMY(b.fecha);
+    return d !== 0 ? d : Number(a.id) - Number(b.id);
+  }).pop();
+}
+/* Lo que movió la caja estrictamente DESPUÉS de una fecha. El arqueo manda
+   sobre todo lo de su día: se cuenta al cerrar. */
+function movimientoDeCajaDespues(desde, hasta){
+  let efectivo = 0, bancos = 0;
+  const dentro = f => { const d = parseDMY(f); return d > desde && (!hasta || d <= hasta); };
+  MOVS.forEach(m => {
+    if(m.estado !== 'aprobado' && m.estado !== 'aprobado_caja') return;
+    if(m.tipo === 'reversa' || !dentro(m.fecha)) return;
+    if(esMetodoEfectivo(m.metodo)) efectivo += m.monto; else bancos += m.monto;
+  });
+  SEED.prestamos.forEach(p => {
+    if(!dentro(p.fecha)) return;
+    if(esMetodoEfectivo(p.metodoDesembolso)) efectivo -= p.monto; else bancos -= p.monto;
+  });
+  TRASPASOS.forEach(t => {
+    if(!dentro(t.fecha)) return;
+    if(t.desde === 'efectivo'){ efectivo -= t.monto; bancos += t.monto; }
+    else { bancos -= t.monto; efectivo += t.monto; }
+  });
+  return {efectivo, bancos};
+}
+/* El disponible a una fecha. Sin arqueo es la resta de siempre; con arqueo,
+   lo contado más lo que se movió después. */
+function saldosDisponiblesHasta(hasta){
+  const aq = ultimoArqueoHasta(hasta);
+  if(!aq){
+    const ab = abonosConfirmadosPorBolsa();
+    const des = desembolsosPorBolsa();
+    const tr = traspasosPorBolsa();
+    const inicialEfectivo = CONFIG.saldoInicialEfectivo;
+    const inicialBancos = capitalInicialTotal() - inicialEfectivo;
+    const efectivo = inicialEfectivo + ab.efectivo - des.efectivo + tr.efectivo;
+    const bancos = inicialBancos + ab.bancos - des.bancos + tr.bancos;
+    return {efectivo, bancos, total: efectivo + bancos, arqueo: null};
+  }
+  const d = movimientoDeCajaDespues(parseDMY(aq.fecha), hasta);
+  const efectivo = aq.efectivo + d.efectivo;
+  const bancos = aq.bancos + d.bancos;
+  return {efectivo, bancos, total: efectivo + bancos, arqueo: aq};
+}
+function saldosDisponibles(){ return saldosDisponiblesHasta(null); }
+/* Lo que los arqueos le sumaron o le quitaron al disponible. Es la plata que
+   se movió sin pasar por un préstamo ni un abono, y el corte la muestra. */
+function ajustesDeArqueoHasta(hasta){
+  return ARQUEOS
+    .filter(a => !hasta || parseDMY(a.fecha) <= hasta)
+    .reduce((s, a) => s + (a.efectivo + a.bancos) - (a.efectivoCalculado + a.bancosCalculado), 0);
 }
 function disponiblePorMetodo(metodo){
   const s = saldosDisponibles();
@@ -1957,6 +2019,25 @@ async function entregarPdf(construir, nombre, etiqueta){
 }
 
 /* ---------- Bandeja: enviar y acusar recibo ---------- */
+async function registrarArqueo({fecha, efectivo, bancos, motivo}){
+  // Se guarda tambien lo que el sistema calculaba en ese momento: sin eso,
+  // manana no se puede saber cuanto fue la diferencia sin rehacer el pasado.
+  const calc = saldosDisponiblesHasta(parseDMY(fecha));
+  const {data: numero, error: eNum} = await sb.rpc('siguiente_arqueo');
+  if(eNum){ toast(mensajeDeErrorSb(eNum)); return; }
+  await conGuardado(async () => {
+    const {error} = await sb.from('arqueos').insert({
+      numero, fecha: dmyAIso(fecha),
+      efectivo, bancos,
+      efectivo_calculado: Math.round(calc.efectivo),
+      bancos_calculado: Math.round(calc.bancos),
+      motivo,
+      hecho_por: (STATE.sesion && STATE.sesion.user ? STATE.sesion.user.email : '') || ''
+    });
+    if(error) throw error;
+  }, () => 'Arqueo ' + numero + ' anotado. El disponible se cuenta desde aquí.');
+}
+
 async function enviarMensajeGeneral({titulo, cuerpo, socioId}){
   const {data: numero, error: eNum} = await sb.rpc('siguiente_mensaje');
   if(eNum){ toast(mensajeDeErrorSb(eNum)); return; }
@@ -2085,6 +2166,8 @@ function construirPdfCorte(m, mio){
     fila('Interes cobrado', pdfMoney(g.acumulado.interesCobrado));
     fila('Rebajas otorgadas', '- ' + pdfMoney(g.acumulado.rebajas));
     fila('Reserva por incobrables', '- ' + pdfMoney(g.utilidad.provision));
+    if(g.tesoreria && g.tesoreria.ajustes)
+      fila('Ajustes de arqueo', pdfMoney(g.tesoreria.ajustes));
     fila('Utilidad prudente', pdfMoney(g.utilidad.prudenteAcum)
          + '   (' + pdfMoney(g.utilidad.porSocio) + ' por socio)', true);
     c.bajar(4);
@@ -2325,9 +2408,13 @@ function calcularCorteMensual(anio, mes){
   const interesPactadoAcum = vivos.reduce((a,p) => a + p.intereses, 0);
   const moraAcum = vivos.reduce((a,p) => a + moraAplicadaHasta(p.id, hasta), 0);
 
-  const caja = capitalInicial + cobradoAcum - desembolsadoAcum;
+  /* El ajuste de los arqueos entra al cuadre: es plata que se movió sin
+     pasar por un préstamo ni un abono, y esconderla rompería la igualdad. */
+  const ajustes = ajustesDeArqueoHasta(hasta);
+  const caja = capitalInicial + cobradoAcum - desembolsadoAcum + ajustes;
   const izquierda = Math.round(caja + carteraCruda);
-  const derecha = Math.round(capitalInicial + interesPactadoAcum + moraAcum - rebajasAcum);
+  const derecha = Math.round(capitalInicial + interesPactadoAcum + moraAcum
+                             - rebajasAcum + ajustes);
 
   return {
     version: 1,
@@ -2347,7 +2434,13 @@ function calcularCorteMensual(anio, mes){
               neta: Math.round(carteraBruta - provision),
               tramos: tramos.map(t => ({...t, saldo: Math.round(t.saldo)}))},
     tesoreria: {caja: Math.round(caja), capitalInicial,
-                sobrepagos: Math.round(sobrepagos)},
+                sobrepagos: Math.round(sobrepagos),
+                ajustes: Math.round(ajustes),
+                arqueos: ARQUEOS.filter(a => parseDMY(a.fecha) <= hasta).map(a => ({
+                  numero: a.numero, fecha: a.fecha, motivo: a.motivo,
+                  diferencia: Math.round((a.efectivo + a.bancos)
+                    - (a.efectivoCalculado + a.bancosCalculado))
+                }))},
     utilidad: {realizadaMes: Math.round(interesCobradoMes),
                realizadaAcum: Math.round(interesCobradoAcum),
                provision: Math.round(provision),
@@ -2421,6 +2514,7 @@ function renderCifrasCorte(g, mio){
       <div class=""><span class="k">Interés cobrado</span><span class="v">${formatMoney(g.acumulado.interesCobrado)}</span></div>
       <div class=""><span class="k">Rebajas otorgadas</span><span class="v">− ${formatMoney(g.acumulado.rebajas)}</span></div>
       <div class=""><span class="k">Reserva por incobrables</span><span class="v">− ${formatMoney(g.utilidad.provision)}</span></div>
+      ${g.tesoreria && g.tesoreria.ajustes ? `<div class=""><span class="k">Ajustes de arqueo</span><span class="v">${formatMoney(g.tesoreria.ajustes)}</span></div>` : ''}
       <div class="fuerte"><span class="k">Utilidad prudente</span><span class="v">${formatMoney(g.utilidad.prudenteAcum)}<small>${formatMoney(g.utilidad.porSocio)} por socio</small></span></div>
       </div>
     <p class="muted" style="font-size:12.5px;">
@@ -3109,7 +3203,7 @@ function renderScreen(){
     if(STATE.screen==='tablero') return renderTablero();
     if(STATE.screen==='aprobar') return renderPorAprobar();
     if(STATE.screen==='registrarSocio') return renderRegistrarAbono(true);
-    if(STATE.screen==='cierreCaja') return renderCierreCaja() + renderTraspasos();
+    if(STATE.screen==='cierreCaja') return renderCierreCaja() + renderTraspasos() + renderArqueo();
     if(STATE.screen==='solicitudes') return renderSolicitudesAdmin();
     if(STATE.screen==='tablas') return renderTablas();
     if(STATE.screen==='vencidos') return renderVencidos();
@@ -4113,6 +4207,66 @@ function renderTablaResumen(){
 
 /* ---------- ADMIN: Configuración ---------- */
 /* ---------- ADMIN: mover plata entre caja y bancos ---------- */
+function renderArqueo(){
+  const s = saldosDisponibles();
+  const aq = s.arqueo;
+  const hoy = formatDMY(todayCutoff());
+  return `
+  <div class="card">
+    <h3>Arqueo de caja</h3>
+    <p class="muted">Contá el efectivo, mirá el saldo del banco y anotá lo que
+      <b>hay</b>. Si no coincide con lo que el sistema calcula, la diferencia
+      queda anotada y explicada, no escondida.</p>
+
+    ${aq ? `<div class="notice">
+      Último arqueo: <b>${aq.numero}</b> del ${aq.fecha} ·
+      ${formatMoney(aq.efectivo)} en efectivo y ${formatMoney(aq.bancos)} en banco.
+      ${(aq.efectivo + aq.bancos) !== (aq.efectivoCalculado + aq.bancosCalculado)
+        ? 'Diferencia contra lo calculado: <b>' +
+          formatMoney((aq.efectivo + aq.bancos) - (aq.efectivoCalculado + aq.bancosCalculado)) +
+          '</b> · ' + aq.motivo
+        : 'Cuadraba exacto.'}
+    </div>` : `<div class="notice warn">
+      Todavía no se ha hecho ningún arqueo. El disponible sale de restar
+      desembolsos a lo cobrado, que supone que nada salió de caja por fuera.
+    </div>`}
+
+    <form id="form-arqueo">
+      <div class="grid cols-2">
+        <div class="field">
+          <label for="aq-fecha">Fecha del arqueo</label>
+          <input type="text" id="aq-fecha" value="${hoy}" placeholder="DD/MM/AAAA" required>
+          <span class="hint">Cuenta al cerrar ese día: lo de fechas posteriores se suma aparte.</span>
+        </div>
+        <div class="field">
+          <label for="aq-efectivo">Efectivo contado</label>
+          <input type="number" id="aq-efectivo" min="0" step="1" required placeholder="0">
+        </div>
+      </div>
+      <div class="field">
+        <label for="aq-bancos">Saldo en banco</label>
+        <input type="number" id="aq-bancos" min="0" step="1" required placeholder="0">
+      </div>
+      <div class="field">
+        <label for="aq-motivo">A qué se debe la diferencia</label>
+        <textarea id="aq-motivo" required placeholder="Ej: retiros de utilidad de julio y agosto que no se anotaron."></textarea>
+        <span class="hint">Obligatorio. Un descuadre sin explicación no es un arqueo.</span>
+      </div>
+      <button type="submit" class="btn btn-primary btn-block">Anotar el arqueo</button>
+    </form>
+
+    ${ARQUEOS.length ? `<h4 style="margin-top:18px;">Arqueos anteriores</h4>
+      <div class="cifras">
+        ${ARQUEOS.slice().reverse().map(a => `<div class="">
+          <span class="k">${a.numero} · ${a.fecha}<br><small>${a.motivo}</small></span>
+          <span class="v">${formatMoney(a.efectivo + a.bancos)}<small>${
+            formatMoney((a.efectivo + a.bancos) - (a.efectivoCalculado + a.bancosCalculado))
+          } de diferencia</small></span>
+        </div>`).join('')}
+      </div>` : ''}
+  </div>`;
+}
+
 function renderTraspasos(){
   const s = saldosDisponibles();
   const ultimos = TRASPASOS.slice().sort((a,b)=>b.numero.localeCompare(a.numero)).slice(0,8);
@@ -5222,6 +5376,19 @@ async function copiarAlPortapapeles(texto, mensajeOk){
 }
 
 /* -------- formulario de accesos (administrador) -------- */
+document.addEventListener('submit', async function(e){
+  if(e.target.id !== 'form-arqueo') return;
+  e.preventDefault();
+  const fecha = document.getElementById('aq-fecha').value.trim();
+  const efectivo = Number(document.getElementById('aq-efectivo').value);
+  const bancos = Number(document.getElementById('aq-bancos').value);
+  const motivo = document.getElementById('aq-motivo').value.trim();
+  if(!/^\d{2}\/\d{2}\/\d{4}$/.test(fecha)){ toast('La fecha va como DD/MM/AAAA.'); return; }
+  if(!(efectivo >= 0) || !(bancos >= 0)){ toast('Los montos no pueden ser negativos.'); return; }
+  if(!motivo){ toast('Falta explicar a qué se debe la diferencia.'); return; }
+  await registrarArqueo({fecha, efectivo, bancos, motivo});
+});
+
 document.addEventListener('submit', async function(e){
   if(e.target.id !== 'form-mensaje') return;
   e.preventDefault();
