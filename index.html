@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '2.9';
+const APP_VERSION = '3.0';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -4668,8 +4668,15 @@ function renderConfig(){
     </div>
     <div class="field">
       <label>Del capital inicial, ¿cuánto estaba en efectivo?</label>
-      <input type="text" inputmode="numeric" class="money-input" id="cfg-saldo-efectivo" value="${moneyInputValue(CONFIG.saldoInicialEfectivo)}">
-      <span class="hint">Capital inicial total: ${formatMoney(capitalInicialTotal())}. El resto (${formatMoney(capitalInicialTotal()-CONFIG.saldoInicialEfectivo)}) se toma como dinero en bancos. Sirve para separar el disponible entre caja y bancos. Según los movimientos ya cargados, el valor debe quedar entre ${formatMoney(rangoSaldoInicialEfectivo().min)} y ${formatMoney(rangoSaldoInicialEfectivo().max)}.</span>
+      <input type="text" inputmode="numeric" class="money-input" id="cfg-saldo-efectivo" value="${moneyInputValue(CONFIG.saldoInicialEfectivo)}"${ultimoArqueoHasta(null)?' disabled':''}>
+      ${ultimoArqueoHasta(null) ? `<span class="hint"><b>Este campo ya no se usa.</b>
+        El disponible se cuenta desde el arqueo ${ultimoArqueoHasta(null).numero} del
+        ${ultimoArqueoHasta(null).fecha}, que dice lo que hay de verdad. Este número
+        suponía que el día uno todo el capital estaba en caja o en banco, y casi nunca
+        es así: lo normal es que ya estuviera prestado.</span>`
+      : `<span class="hint">Capital inicial total: ${formatMoney(capitalInicialTotal())}. El resto (${formatMoney(capitalInicialTotal()-CONFIG.saldoInicialEfectivo)}) se toma como dinero en bancos. Sirve para separar el disponible entre caja y bancos. Según los movimientos ya cargados, el valor debe quedar entre ${formatMoney(rangoSaldoInicialEfectivo().min)} y ${formatMoney(rangoSaldoInicialEfectivo().max)}.
+        Si el capital ya estaba prestado el día uno, este reparto no lo puede
+        representar: para eso está el arqueo, en Cierre de caja.</span>`}
     </div>
     <button class="btn btn-primary" data-action="guardar-config">Guardar configuración</button>
   </div>
