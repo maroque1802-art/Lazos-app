@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '2.7';
+const APP_VERSION = '2.8';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -473,6 +473,9 @@ const MORAS = [];
 const TRASPASOS = [];
 /* La cuenta de la realidad: lo que HAY, contado. Ancla el disponible. */
 const ARQUEOS = [];
+/* Comisiones y gastos. Un hecho con dos efectos: cuesta plata de la caja, y
+   si hay préstamo al cual cargárselo, le sube el saldo al cliente. */
+const OTROS_CARGOS = [];
 const RECIBOS = [];
 const CIERRES = [];
 /* Denominaciones de colon costarricense en circulacion, de mayor a menor. */
@@ -707,7 +710,7 @@ function filaASolicitud(r, nombrePorSocioId){
    costo es minimo, y evita que la pantalla muestre algo distinto de lo
    que quedo guardado. */
 async function cargarTodo(){
-  const [socios, prestamos, abonos, movs, recibos, cierres, sols, cfg, moras, traspasos, arqueos] = await Promise.all([
+  const [socios, prestamos, abonos, movs, recibos, cierres, sols, cfg, moras, traspasos, arqueos, cargos] = await Promise.all([
     sb.from('socios').select('id, nombre, capital_inicial').order('nombre'),
     sb.from('prestamos').select('*'),
     sb.from('abonos').select('*'),
@@ -718,7 +721,8 @@ async function cargarTodo(){
     sb.from('config').select('*').maybeSingle(),
     sb.from('cargos_mora').select('*').order('numero'),
     sb.from('traspasos').select('*').order('numero'),
-    sb.from('arqueos').select('*').order('fecha').order('id')
+    sb.from('arqueos').select('*').order('fecha').order('id'),
+    sb.from('otros_cargos').select('*').order('numero')
   ]);
 
   // Sin la migración 0008 estas dos tablas no existen; que falten no debe
@@ -734,6 +738,13 @@ async function cargarTodo(){
     efectivoCalculado: Number(r.efectivo_calculado || 0),
     bancosCalculado: Number(r.bancos_calculado || 0),
     motivo: r.motivo || '', hechoPor: r.hecho_por || ''
+  }));
+  OTROS_CARGOS.length = 0;
+  (cargos && cargos.data ? cargos.data : []).forEach(r => OTROS_CARGOS.push({
+    id: r.id, numero: r.numero, fecha: isoADmy(r.fecha),
+    prestamoId: r.prestamo_numero, concepto: r.concepto,
+    montoCliente: Number(r.monto_cliente || 0), costo: Number(r.costo || 0),
+    bolsa: r.bolsa || 'bancos', anulado: !!r.anulado, hechoPor: r.hecho_por || ''
   }));
 
   const error = [socios, prestamos, abonos, movs, recibos, cierres, sols, cfg]
@@ -820,7 +831,7 @@ function nuevoCodigoRegistro(){
 /* Todo lo que la sesión trajo consigo, para soltarlo al salir. */
 function olvidarDatos(){
   [SEED.socios, SEED.prestamos, SEED.abonos, MOVS, RECIBOS, CIERRES,
-   SOLICITUDES, ACCESOS, BITACORA, MORAS, TRASPASOS, ARQUEOS,
+   SOLICITUDES, ACCESOS, BITACORA, MORAS, TRASPASOS, ARQUEOS, OTROS_CARGOS,
    MENSAJES, MENSAJES_DETALLE, MENSAJES_LEIDOS].forEach(a => { a.length = 0; });
   STATE.socioId = null; STATE.perfilId = null;
 }
@@ -1005,9 +1016,19 @@ function totalMoraAplicada(prestamoId){
     .reduce((s,m) => s + m.monto, 0);
 }
 
+/* Lo que se le cargó al cliente por encima del préstamo: comisiones que
+   pagó Lazos y se le trasladan. Sube el saldo, igual que la mora. */
+function totalOtrosCargos(prestamoId){
+  return OTROS_CARGOS
+    .filter(c => !c.anulado && c.prestamoId && mismoId(c.prestamoId, prestamoId))
+    .reduce((s, c) => s + c.montoCliente, 0);
+}
+function cargosDePrestamo(prestamoId){
+  return OTROS_CARGOS.filter(c => c.prestamoId && mismoId(c.prestamoId, prestamoId));
+}
 function saldoConfirmado(p){
   const s = totalAPagar(p) - totalAbonadoConfirmado(p.id) - totalRebajasConfirmadas(p.id)
-          + totalMoraAplicada(p.id);
+          + totalMoraAplicada(p.id) + totalOtrosCargos(p.id);
   return Math.max(0, Math.round(s));
 }
 function calcEstado(p){
@@ -1155,6 +1176,20 @@ function traspasosPorBolsa(){
    préstamo o un abono. No es cierto: hay retiros de utilidad, gastos, y
    cobros que se hicieron sin anotar. El arqueo ancla el disponible a lo que
    de verdad hay, y desde su fecha se cuenta desde ahí. */
+/* Lo que los cargos le sacaron a cada bolsa. El cobro al cliente no toca la
+   caja: eso entra cuando el cliente pague. Lo que sale hoy es el costo. */
+function costosDeCargosPorBolsa(desde, hasta){
+  let efectivo = 0, bancos = 0;
+  OTROS_CARGOS.forEach(cg => {
+    if(cg.anulado || !cg.costo) return;
+    const d = parseDMY(cg.fecha);
+    if(desde && d <= desde) return;
+    if(hasta && d > hasta) return;
+    if(cg.bolsa === 'efectivo') efectivo += cg.costo; else bancos += cg.costo;
+  });
+  return {efectivo, bancos};
+}
+
 function ultimoArqueoHasta(hasta){
   const candidatos = ARQUEOS.filter(a => !hasta || parseDMY(a.fecha) <= hasta);
   if(!candidatos.length) return null;
@@ -1177,6 +1212,8 @@ function movimientoDeCajaDespues(desde, hasta){
     if(!dentro(p.fecha)) return;
     if(esMetodoEfectivo(p.metodoDesembolso)) efectivo -= p.monto; else bancos -= p.monto;
   });
+  const cg = costosDeCargosPorBolsa(desde, hasta);
+  efectivo -= cg.efectivo; bancos -= cg.bancos;
   TRASPASOS.forEach(t => {
     if(!dentro(t.fecha)) return;
     if(t.desde === 'efectivo'){ efectivo -= t.monto; bancos += t.monto; }
@@ -1192,10 +1229,11 @@ function saldosDisponiblesHasta(hasta){
     const ab = abonosConfirmadosPorBolsa();
     const des = desembolsosPorBolsa();
     const tr = traspasosPorBolsa();
+    const cg = costosDeCargosPorBolsa(null, hasta);
     const inicialEfectivo = CONFIG.saldoInicialEfectivo;
     const inicialBancos = capitalInicialTotal() - inicialEfectivo;
-    const efectivo = inicialEfectivo + ab.efectivo - des.efectivo + tr.efectivo;
-    const bancos = inicialBancos + ab.bancos - des.bancos + tr.bancos;
+    const efectivo = inicialEfectivo + ab.efectivo - des.efectivo + tr.efectivo - cg.efectivo;
+    const bancos = inicialBancos + ab.bancos - des.bancos + tr.bancos - cg.bancos;
     return {efectivo, bancos, total: efectivo + bancos, arqueo: null};
   }
   const d = movimientoDeCajaDespues(parseDMY(aq.fecha), hasta);
@@ -2019,6 +2057,21 @@ async function entregarPdf(construir, nombre, etiqueta){
 }
 
 /* ---------- Bandeja: enviar y acusar recibo ---------- */
+async function registrarOtroCargo({fecha, prestamoId, concepto, montoCliente, costo, bolsa}){
+  const {data: numero, error: eNum} = await sb.rpc('siguiente_otro_cargo');
+  if(eNum){ toast(mensajeDeErrorSb(eNum)); return; }
+  await conGuardado(async () => {
+    const {error} = await sb.from('otros_cargos').insert({
+      numero, fecha: dmyAIso(fecha),
+      prestamo_numero: prestamoId || null,
+      concepto,
+      monto_cliente: montoCliente, costo, bolsa,
+      hecho_por: (STATE.sesion && STATE.sesion.user ? STATE.sesion.user.email : '') || ''
+    });
+    if(error) throw error;
+  }, () => 'Cargo ' + numero + ' anotado.');
+}
+
 async function registrarArqueo({fecha, efectivo, bancos, motivo}){
   // Se guarda tambien lo que el sistema calculaba en ese momento: sin eso,
   // manana no se puede saber cuanto fue la diferencia sin rehacer el pasado.
@@ -2166,6 +2219,10 @@ function construirPdfCorte(m, mio){
     fila('Interes cobrado', pdfMoney(g.acumulado.interesCobrado));
     fila('Rebajas otorgadas', '- ' + pdfMoney(g.acumulado.rebajas));
     fila('Reserva por incobrables', '- ' + pdfMoney(g.utilidad.provision));
+    if(g.tesoreria && g.tesoreria.gastosFinancieros)
+      fila('Gastos financieros', '- ' + pdfMoney(g.tesoreria.gastosFinancieros));
+    if(g.tesoreria && g.tesoreria.cargosAlCliente)
+      fila('Trasladado a los clientes', pdfMoney(g.tesoreria.cargosAlCliente));
     if(g.tesoreria && g.tesoreria.ajustes)
       fila('Ajustes de arqueo', pdfMoney(g.tesoreria.ajustes));
     fila('Utilidad prudente', pdfMoney(g.utilidad.prudenteAcum)
@@ -2309,7 +2366,11 @@ function saldoCrudoHasta(p, hasta){
   const movs = movsAprobadosHasta(p.id, hasta);
   const cobrado = movs.reduce((a,m) => a + m.monto, 0);
   const rebajas = movs.reduce((a,m) => a + (m.rebajaAplicada || 0), 0);
-  return p.monto + p.intereses + moraAplicadaHasta(p.id, hasta) - cobrado - rebajas;
+  const cargos = OTROS_CARGOS
+    .filter(cg => !cg.anulado && cg.prestamoId && mismoId(cg.prestamoId, p.id)
+                && parseDMY(cg.fecha) <= hasta)
+    .reduce((a, cg) => a + cg.montoCliente, 0);
+  return p.monto + p.intereses + moraAplicadaHasta(p.id, hasta) + cargos - cobrado - rebajas;
 }
 
 function calcularCorteMensual(anio, mes){
@@ -2411,10 +2472,17 @@ function calcularCorteMensual(anio, mes){
   /* El ajuste de los arqueos entra al cuadre: es plata que se movió sin
      pasar por un préstamo ni un abono, y esconderla rompería la igualdad. */
   const ajustes = ajustesDeArqueoHasta(hasta);
-  const caja = capitalInicial + cobradoAcum - desembolsadoAcum + ajustes;
+  /* Los cargos entran por los dos lados: el costo baja la caja, el cobro sube
+     la cartera. Cuando se le traslada al cliente lo mismo que costó, se
+     cancelan y el resultado no se mueve; la diferencia es margen o pérdida. */
+  const vigentesHasta = cg => !cg.anulado && parseDMY(cg.fecha) <= hasta;
+  const costosAcum = OTROS_CARGOS.filter(vigentesHasta).reduce((a,cg)=>a+cg.costo, 0);
+  const cargosAlClienteAcum = OTROS_CARGOS.filter(vigentesHasta)
+    .reduce((a,cg)=>a+cg.montoCliente, 0);
+  const caja = capitalInicial + cobradoAcum - desembolsadoAcum + ajustes - costosAcum;
   const izquierda = Math.round(caja + carteraCruda);
   const derecha = Math.round(capitalInicial + interesPactadoAcum + moraAcum
-                             - rebajasAcum + ajustes);
+                             + cargosAlClienteAcum - rebajasAcum + ajustes - costosAcum);
 
   return {
     version: 1,
@@ -2436,6 +2504,8 @@ function calcularCorteMensual(anio, mes){
     tesoreria: {caja: Math.round(caja), capitalInicial,
                 sobrepagos: Math.round(sobrepagos),
                 ajustes: Math.round(ajustes),
+                gastosFinancieros: Math.round(costosAcum),
+                cargosAlCliente: Math.round(cargosAlClienteAcum),
                 arqueos: ARQUEOS.filter(a => parseDMY(a.fecha) <= hasta).map(a => ({
                   numero: a.numero, fecha: a.fecha, motivo: a.motivo,
                   diferencia: Math.round((a.efectivo + a.bancos)
@@ -2514,6 +2584,8 @@ function renderCifrasCorte(g, mio){
       <div class=""><span class="k">Interés cobrado</span><span class="v">${formatMoney(g.acumulado.interesCobrado)}</span></div>
       <div class=""><span class="k">Rebajas otorgadas</span><span class="v">− ${formatMoney(g.acumulado.rebajas)}</span></div>
       <div class=""><span class="k">Reserva por incobrables</span><span class="v">− ${formatMoney(g.utilidad.provision)}</span></div>
+      ${g.tesoreria && g.tesoreria.gastosFinancieros ? `<div class=""><span class="k">Gastos financieros</span><span class="v">− ${formatMoney(g.tesoreria.gastosFinancieros)}</span></div>` : ''}
+      ${g.tesoreria && g.tesoreria.cargosAlCliente ? `<div class=""><span class="k">Trasladado a los clientes</span><span class="v">${formatMoney(g.tesoreria.cargosAlCliente)}</span></div>` : ''}
       ${g.tesoreria && g.tesoreria.ajustes ? `<div class=""><span class="k">Ajustes de arqueo</span><span class="v">${formatMoney(g.tesoreria.ajustes)}</span></div>` : ''}
       <div class="fuerte"><span class="k">Utilidad prudente</span><span class="v">${formatMoney(g.utilidad.prudenteAcum)}<small>${formatMoney(g.utilidad.porSocio)} por socio</small></span></div>
       </div>
@@ -3203,7 +3275,8 @@ function renderScreen(){
     if(STATE.screen==='tablero') return renderTablero();
     if(STATE.screen==='aprobar') return renderPorAprobar();
     if(STATE.screen==='registrarSocio') return renderRegistrarAbono(true);
-    if(STATE.screen==='cierreCaja') return renderCierreCaja() + renderTraspasos() + renderArqueo();
+    if(STATE.screen==='cierreCaja') return renderCierreCaja() + renderTraspasos()
+                                        + renderOtrosCargos() + renderArqueo();
     if(STATE.screen==='solicitudes') return renderSolicitudesAdmin();
     if(STATE.screen==='tablas') return renderTablas();
     if(STATE.screen==='vencidos') return renderVencidos();
@@ -3295,12 +3368,15 @@ function renderDetalle(id, esAdmin){
     ${estado!=='Cancelado' ? `<button class="btn btn-accent btn-block no-print" style="margin:12px 0;" data-action="goto" data-screen="${esAdmin?'registrarSocio':'registrar'}" data-preselect="${p.id}">➕ Registrar abono para este préstamo</button>` : ''}
     <div class="kv"><span class="k">Saldo confirmado</span><span class="v" style="color:var(--danger)">${formatMoney(saldo)}</span></div>
     <div class="kv"><span class="k">Total a pagar</span><span class="v">${formatMoney(totalAPagar(p))}</span></div>
+    ${totalOtrosCargos(p.id) ? `<div class="kv"><span class="k">Otros cobros</span><span class="v">${formatMoney(totalOtrosCargos(p.id))}</span></div>` : ''}
     <div class="kv"><span class="k">Monto prestado</span><span class="v">${formatMoney(p.monto)}</span></div>
     ${pendiente>0 ? `<div class="notice warn">Hay ${formatMoney(pendiente)} en abonos pendientes de aprobación. Todavía no se restan del saldo confirmado — no le digas al cliente que ya bajó.</div>` : ''}
     <div class="divider"></div>
     <div class="kv"><span class="k">Fecha del préstamo</span><span class="v">${p.fecha}</span></div>
     <div class="kv"><span class="k">Plazo</span><span class="v">${p.plazo} meses</span></div>
     <div class="kv"><span class="k">Intereses pactados</span><span class="v">${formatMoney(p.intereses)}</span></div>
+    ${cargosDePrestamo(p.id).filter(cg=>!cg.anulado && cg.montoCliente).map(cg=>
+      `<div class="kv"><span class="k" style="padding-left:10px;">· ${cg.concepto} (${cg.fecha})</span><span class="v">${formatMoney(cg.montoCliente)}</span></div>`).join('')}
     <div class="kv"><span class="k">Fecha de vencimiento</span><span class="v">${p.vencimiento}</span></div>
     <div class="kv"><span class="k">Método de desembolso</span><span class="v">${p.metodoDesembolso}</span></div>
     ${formatDetalleMetodo(p.metodoDesembolso, p.detalleMetodo) ? `<div class="kv"><span class="k">Datos del desembolso</span><span class="v" style="text-align:right; max-width:60%;">${formatDetalleMetodo(p.metodoDesembolso, p.detalleMetodo)}</span></div>` : ''}
@@ -4207,6 +4283,78 @@ function renderTablaResumen(){
 
 /* ---------- ADMIN: Configuración ---------- */
 /* ---------- ADMIN: mover plata entre caja y bancos ---------- */
+function renderOtrosCargos(){
+  const hoy = formatDMY(todayCutoff());
+  const vivos = SEED.prestamos.filter(p => calcEstado(p) !== 'Cancelado');
+  const costoTotal = OTROS_CARGOS.filter(c=>!c.anulado).reduce((a,c)=>a+c.costo,0);
+  const cobroTotal = OTROS_CARGOS.filter(c=>!c.anulado).reduce((a,c)=>a+c.montoCliente,0);
+  return `
+  <div class="card">
+    <h3>Gastos y comisiones</h3>
+    <p class="muted">Lo que le cuesta a Lazos mover la plata. Si hay préstamo
+      al cual cargárselo, se le suma al saldo del cliente; si no, es un gasto
+      de la operación.</p>
+
+    <form id="form-cargo">
+      <div class="grid cols-2">
+        <div class="field">
+          <label for="cg-fecha">Fecha</label>
+          <input type="text" id="cg-fecha" value="${hoy}" placeholder="DD/MM/AAAA" required>
+        </div>
+        <div class="field">
+          <label for="cg-bolsa">De dónde salió</label>
+          <select id="cg-bolsa">
+            <option value="bancos">Banco</option>
+            <option value="efectivo">Efectivo</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="cg-concepto">Concepto</label>
+        <input type="text" id="cg-concepto" required placeholder="Ej: comisión SINPE del desembolso">
+      </div>
+      <div class="field">
+        <label for="cg-prestamo">¿A cuál préstamo se le carga?</label>
+        <select id="cg-prestamo">
+          <option value="">A ninguno · es gasto de la operación</option>
+          ${vivos.map(p=>`<option value="${p.id}">${p.id} · ${p.cliente}</option>`).join('')}
+        </select>
+      </div>
+      <div class="grid cols-2">
+        <div class="field">
+          <label for="cg-costo">Lo que costó</label>
+          <input type="number" id="cg-costo" min="0" step="1" value="0" >
+          <span class="hint">Sale de la caja.</span>
+        </div>
+        <div class="field">
+          <label for="cg-cliente">Lo que se le cobra al cliente</label>
+          <input type="number" id="cg-cliente" min="0" step="1" value="0">
+          <span class="hint">Sube el saldo del préstamo.</span>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary btn-block">Anotar el cargo</button>
+    </form>
+
+    ${OTROS_CARGOS.length ? `
+      <div class="cifras" style="margin-top:16px;">
+        <div class="fuerte"><span class="k">Le ha costado a Lazos</span><span class="v">${formatMoney(costoTotal)}</span></div>
+        <div class="fuerte"><span class="k">Se le ha trasladado a clientes</span><span class="v">${formatMoney(cobroTotal)}</span></div>
+        <div class="${costoTotal===cobroTotal?'':'fuerte'}"><span class="k">${
+          cobroTotal >= costoTotal ? 'Margen' : 'Lo que asume Lazos'
+        }</span><span class="v">${formatMoney(cobroTotal - costoTotal)}</span></div>
+      </div>
+      <h4 style="margin-top:16px;">Anotados</h4>
+      <div class="cifras">
+        ${OTROS_CARGOS.slice().reverse().map(cg=>`<div class="">
+          <span class="k">${cg.numero} · ${cg.fecha}<br><small>${cg.concepto}${
+            cg.prestamoId ? ' · préstamo ' + cg.prestamoId : ' · gasto de la operación'}</small></span>
+          <span class="v">${formatMoney(cg.costo)}<small>${
+            cg.montoCliente ? formatMoney(cg.montoCliente) + ' al cliente' : 'no se traslada'}</small></span>
+        </div>`).join('')}
+      </div>` : ''}
+  </div>`;
+}
+
 function renderArqueo(){
   const s = saldosDisponibles();
   const aq = s.arqueo;
@@ -5196,6 +5344,13 @@ document.addEventListener('click', function(e){
 });
 
 document.addEventListener('input', function(e){
+  // Lo normal es trasladarle al cliente lo mismo que costó. Se propone, y si
+  // el caso es otro se cambia a mano.
+  if(e.target.id === 'cg-costo'){
+    const destino = document.getElementById('cg-cliente');
+    const prestamo = document.getElementById('cg-prestamo');
+    if(destino && prestamo && prestamo.value) destino.value = e.target.value;
+  }
   if(e.target.classList.contains('money-input')){
     formatMoneyInputLive(e.target);
   }
@@ -5376,6 +5531,22 @@ async function copiarAlPortapapeles(texto, mensajeOk){
 }
 
 /* -------- formulario de accesos (administrador) -------- */
+document.addEventListener('submit', async function(e){
+  if(e.target.id !== 'form-cargo') return;
+  e.preventDefault();
+  const fecha = document.getElementById('cg-fecha').value.trim();
+  const prestamoId = document.getElementById('cg-prestamo').value;
+  const concepto = document.getElementById('cg-concepto').value.trim();
+  const costo = Number(document.getElementById('cg-costo').value) || 0;
+  const montoCliente = Number(document.getElementById('cg-cliente').value) || 0;
+  const bolsa = document.getElementById('cg-bolsa').value;
+  if(!/^\d{2}\/\d{2}\/\d{4}$/.test(fecha)){ toast('La fecha va como DD/MM/AAAA.'); return; }
+  if(!concepto){ toast('Falta el concepto.'); return; }
+  if(costo <= 0 && montoCliente <= 0){ toast('Un cargo que ni cuesta ni cobra no es nada.'); return; }
+  if(montoCliente > 0 && !prestamoId){ toast('Para cobrarle a un cliente hace falta decir a cuál préstamo.'); return; }
+  await registrarOtroCargo({fecha, prestamoId, concepto, montoCliente, costo, bolsa});
+});
+
 document.addEventListener('submit', async function(e){
   if(e.target.id !== 'form-arqueo') return;
   e.preventDefault();
