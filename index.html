@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '3.4';
+const APP_VERSION = '3.5';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -1660,7 +1660,6 @@ function construirPdfRecibo(r, reimpresion){
   if(!r.anulado) c.firmas('Recibido por (Lazos)', 'Conforme, el cliente');
 
   c.bajar(26);
-  c.texto('Recibo interno. No sustituye factura electronica.', 7, 'F1', margen);
   // Un papel que parece emitido en marzo y se imprimio en septiembre es justo
   // lo que despues nadie puede explicar. Que lo diga el papel mismo.
   if(r.origen === 'carga_inicial'){
@@ -1815,8 +1814,6 @@ function construirPdfCierre(ci, reimpresion){
   }
 
   c.firmas('Elaborado por (administrador)', 'Revisado por');
-  c.bajar(26);
-  c.texto('Documento interno de control. No sustituye factura electronica.', 7, 'F1', margen);
   return c.build();
 }
 
@@ -4911,7 +4908,6 @@ function renderReciboModal(r){
           <tr><td class="k">Saldo nuevo</td><td class="v">${formatMoney(r.saldoNuevo)}</td></tr>
           <tr><td class="k">Próxima fecha de vencimiento</td><td class="v">${r.proximoVencimiento}</td></tr>
         </table>
-        <div class="legal">Recibo interno. No sustituye factura electrónica.</div>
       </div>
       </div>
       <div style="display:flex; gap:8px; margin-top:12px;" class="no-print">
