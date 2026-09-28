@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '3.0';
+const APP_VERSION = '3.1';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -557,6 +557,7 @@ function filaAPrestamo(r, nombrePorSocioId){
     intereses: Number(r.intereses),
     vencimiento: isoADmy(r.fecha_vencimiento),
     metodoDesembolso: r.metodo_desembolso,
+    arrastre: !!r.arrastre,
     obs: r.observaciones || ''
   };
 }
@@ -1133,6 +1134,27 @@ function calcResumen(){
   return {vigentes, vencidos, cancelados, capitalNoCancelado, saldoPorCobrar, saldoVencido, totalAbonadoHoy, totalPrestamos: ps.length};
 }
 function capitalInicialTotal(){ return SEED.socios.reduce((s,x)=>s+x.capital,0); }
+
+/* ---------- Préstamos que vienen del periodo anterior ----------
+   Su capital no se colocó en este periodo y su interés no se ganó en este
+   periodo. El capital se corrige solo: el sistema lo cuenta como plata
+   disponible el día uno (venía dentro del capital de los socios) y acto
+   seguido lo descuenta como desembolso, así que se cancela. Lo que queda
+   colgando es el INTERÉS, que el sistema toma como efectivo que nunca
+   existió. Por eso se resta. */
+function prestamosArrastrados(hasta){
+  return SEED.prestamos.filter(p => p.arrastre && (!hasta || parseDMY(p.fecha) <= hasta));
+}
+function interesArrastradoHasta(hasta){
+  return prestamosArrastrados(hasta).reduce((s, p) => s + p.intereses, 0);
+}
+function interesArrastradoPorBolsa(hasta){
+  let efectivo = 0, bancos = 0;
+  prestamosArrastrados(hasta).forEach(p => {
+    if(esMetodoEfectivo(p.metodoDesembolso)) efectivo += p.intereses; else bancos += p.intereses;
+  });
+  return {efectivo, bancos};
+}
 function totalDesembolsado(){ return SEED.prestamos.reduce((s,p)=>s+p.monto,0); }
 
 /* ---------- Tesorería: efectivo en caja vs dinero en bancos ----------
@@ -1226,10 +1248,11 @@ function saldosDisponiblesHasta(hasta){
     const des = desembolsosPorBolsa();
     const tr = traspasosPorBolsa();
     const cg = costosDeCargosPorBolsa(null, hasta);
+    const ar = interesArrastradoPorBolsa(hasta);
     const inicialEfectivo = CONFIG.saldoInicialEfectivo;
     const inicialBancos = capitalInicialTotal() - inicialEfectivo;
-    const efectivo = inicialEfectivo + ab.efectivo - des.efectivo + tr.efectivo - cg.efectivo;
-    const bancos = inicialBancos + ab.bancos - des.bancos + tr.bancos - cg.bancos;
+    const efectivo = inicialEfectivo + ab.efectivo - des.efectivo + tr.efectivo - cg.efectivo - ar.efectivo;
+    const bancos = inicialBancos + ab.bancos - des.bancos + tr.bancos - cg.bancos - ar.bancos;
     return {efectivo, bancos, total: efectivo + bancos, arqueo: null};
   }
   const d = movimientoDeCajaDespues(parseDMY(aq.fecha), hasta);
@@ -2053,6 +2076,19 @@ async function entregarPdf(construir, nombre, etiqueta){
 }
 
 /* ---------- Bandeja: enviar y acusar recibo ---------- */
+async function marcarArrastre(prestamoId, valor){
+  const p = SEED.prestamos.find(x => mismoId(x.id, prestamoId));
+  if(!p) return;
+  await conGuardado(async () => {
+    const {error} = await sb.from('prestamos')
+      .update({arrastre: valor}).eq('numero', prestamoId);
+    if(error) throw error;
+  }, () => valor
+    ? 'Marcado como arrastre. Su interés de ' + formatMoney(p.intereses)
+      + ' sale de la utilidad del periodo.'
+    : 'Ya no es arrastre: vuelve a contar como préstamo del periodo.');
+}
+
 async function registrarOtroCargo({fecha, prestamoId, concepto, montoCliente, costo, bolsa}){
   const {data: numero, error: eNum} = await sb.rpc('siguiente_otro_cargo');
   if(eNum){ toast(mensajeDeErrorSb(eNum)); return; }
@@ -2215,6 +2251,9 @@ function construirPdfCorte(m, mio){
     fila('Interes cobrado', pdfMoney(g.acumulado.interesCobrado));
     fila('Rebajas otorgadas', '- ' + pdfMoney(g.acumulado.rebajas));
     fila('Reserva por incobrables', '- ' + pdfMoney(g.utilidad.provision));
+    if(g.tesoreria && g.tesoreria.interesArrastrado)
+      fila('Interes de prestamos del periodo anterior (no cuenta aca)',
+           pdfMoney(g.tesoreria.interesArrastrado));
     if(g.tesoreria && g.tesoreria.gastosFinancieros)
       fila('Gastos financieros', '- ' + pdfMoney(g.tesoreria.gastosFinancieros));
     if(g.tesoreria && g.tesoreria.cargosAlCliente)
@@ -2378,6 +2417,7 @@ function calcularCorteMensual(anio, mes){
 
   let colocado = 0, interesPactadoNuevo = 0, prestamosNuevos = 0;
   vivos.forEach(p => {
+    if(p.arrastre) return;   // viene de antes: no se coloco en este mes
     if(!enRango(p.fecha, desde, hasta)) return;
     prestamosNuevos++;
     colocado += p.monto;
@@ -2400,6 +2440,7 @@ function calcularCorteMensual(anio, mes){
   // anterior y este. Nada de prorrateos.
   let interesCobradoMes = 0, interesCobradoAcum = 0;
   vivos.forEach(p => {
+    if(p.arrastre) return;   // lo que rinda ya se conto en el periodo anterior
     const alCierre = interesCobradoHasta(p, hasta);
     interesCobradoAcum += alCierre;
     interesCobradoMes += alCierre - interesCobradoHasta(p, vispera);
@@ -2439,10 +2480,11 @@ function calcularCorteMensual(anio, mes){
     }
     if(linea){
       linea.prestamos++;
-      if(enRango(p.fecha, desde, hasta)) linea.colocadoMes += p.monto;
-      const alCierre = interesCobradoHasta(p, hasta);
+      if(!p.arrastre && enRango(p.fecha, desde, hasta)) linea.colocadoMes += p.monto;
+      const alCierre = p.arrastre ? 0 : interesCobradoHasta(p, hasta);
       linea.interesCobradoAcum += alCierre;
-      linea.interesCobradoMes += alCierre - interesCobradoHasta(p, vispera);
+      linea.interesCobradoMes += alCierre
+        - (p.arrastre ? 0 : interesCobradoHasta(p, vispera));
       movsAprobadosHasta(p.id, hasta).forEach(m => {
         if(enRango(m.fecha, desde, hasta)) linea.cobradoMes += m.monto;
       });
@@ -2462,7 +2504,10 @@ function calcularCorteMensual(anio, mes){
     a + movsAprobadosHasta(p.id, hasta).reduce((b,m) => b + m.monto, 0), 0);
   const rebajasAcum = vivos.reduce((a,p) =>
     a + movsAprobadosHasta(p.id, hasta).reduce((b,m) => b + (m.rebajaAplicada||0), 0), 0);
-  const interesPactadoAcum = vivos.reduce((a,p) => a + p.intereses, 0);
+  /* El interes de un arrastre se gano en el periodo anterior: no entra ni a
+     la utilidad ni al lado derecho del cuadre. */
+  const interesPactadoAcum = vivos.reduce((a,p) => a + (p.arrastre ? 0 : p.intereses), 0);
+  const interesArrastrado = vivos.reduce((a,p) => a + (p.arrastre ? p.intereses : 0), 0);
   const moraAcum = vivos.reduce((a,p) => a + moraAplicadaHasta(p.id, hasta), 0);
 
   /* El ajuste de los arqueos entra al cuadre: es plata que se movió sin
@@ -2475,7 +2520,8 @@ function calcularCorteMensual(anio, mes){
   const costosAcum = OTROS_CARGOS.filter(vigentesHasta).reduce((a,cg)=>a+cg.costo, 0);
   const cargosAlClienteAcum = OTROS_CARGOS.filter(vigentesHasta)
     .reduce((a,cg)=>a+cg.montoCliente, 0);
-  const caja = capitalInicial + cobradoAcum - desembolsadoAcum + ajustes - costosAcum;
+  const caja = capitalInicial - interesArrastrado + cobradoAcum - desembolsadoAcum
+             + ajustes - costosAcum;
   const izquierda = Math.round(caja + carteraCruda);
   const derecha = Math.round(capitalInicial + interesPactadoAcum + moraAcum
                              + cargosAlClienteAcum - rebajasAcum + ajustes - costosAcum);
@@ -2498,6 +2544,8 @@ function calcularCorteMensual(anio, mes){
               neta: Math.round(carteraBruta - provision),
               tramos: tramos.map(t => ({...t, saldo: Math.round(t.saldo)}))},
     tesoreria: {caja: Math.round(caja), capitalInicial,
+                interesArrastrado: Math.round(interesArrastrado),
+                prestamosArrastrados: vivos.filter(p=>p.arrastre).length,
                 sobrepagos: Math.round(sobrepagos),
                 ajustes: Math.round(ajustes),
                 gastosFinancieros: Math.round(costosAcum),
@@ -2580,6 +2628,7 @@ function renderCifrasCorte(g, mio){
       <div class=""><span class="k">Interés cobrado</span><span class="v">${formatMoney(g.acumulado.interesCobrado)}</span></div>
       <div class=""><span class="k">Rebajas otorgadas</span><span class="v">− ${formatMoney(g.acumulado.rebajas)}</span></div>
       <div class=""><span class="k">Reserva por incobrables</span><span class="v">− ${formatMoney(g.utilidad.provision)}</span></div>
+      ${g.tesoreria && g.tesoreria.interesArrastrado ? `<div class=""><span class="k">Interés de préstamos del periodo anterior<br><small>${g.tesoreria.prestamosArrastrados} préstamo(s), no cuentan acá</small></span><span class="v">${formatMoney(g.tesoreria.interesArrastrado)}</span></div>` : ''}
       ${g.tesoreria && g.tesoreria.gastosFinancieros ? `<div class=""><span class="k">Gastos financieros</span><span class="v">− ${formatMoney(g.tesoreria.gastosFinancieros)}</span></div>` : ''}
       ${g.tesoreria && g.tesoreria.cargosAlCliente ? `<div class=""><span class="k">Trasladado a los clientes</span><span class="v">${formatMoney(g.tesoreria.cargosAlCliente)}</span></div>` : ''}
       ${g.tesoreria && g.tesoreria.ajustes ? `<div class=""><span class="k">Ajustes de arqueo</span><span class="v">${formatMoney(g.tesoreria.ajustes)}</span></div>` : ''}
@@ -3365,6 +3414,15 @@ function renderDetalle(id, esAdmin){
     <div class="kv"><span class="k">Saldo confirmado</span><span class="v" style="color:var(--danger)">${formatMoney(saldo)}</span></div>
     <div class="kv"><span class="k">Total a pagar</span><span class="v">${formatMoney(totalAPagar(p))}</span></div>
     ${totalOtrosCargos(p.id) ? `<div class="kv"><span class="k">Otros cobros</span><span class="v">${formatMoney(totalOtrosCargos(p.id))}</span></div>` : ''}
+    ${p.arrastre ? `<div class="notice" style="margin-top:10px;">
+      <b>Viene del periodo anterior.</b> Su capital no se colocó en este periodo
+      y sus ${formatMoney(p.intereses)} de interés se ganaron antes, así que no
+      entran en la utilidad de este corte.
+    </div>` : ''}
+    ${STATE.role === 'admin' ? `<button class="btn btn-ghost btn-sm no-print" style="margin-top:10px;"
+      data-action="marcar-arrastre" data-prestamo="${p.id}" data-valor="${p.arrastre?'0':'1'}">
+      ${p.arrastre ? 'Quitarle la marca de arrastre' : 'Este préstamo viene del periodo anterior'}
+    </button>` : ''}
     <div class="kv"><span class="k">Monto prestado</span><span class="v">${formatMoney(p.monto)}</span></div>
     ${pendiente>0 ? `<div class="notice warn">Hay ${formatMoney(pendiente)} en abonos pendientes de aprobación. Todavía no se restan del saldo confirmado — no le digas al cliente que ya bajó.</div>` : ''}
     <div class="divider"></div>
@@ -4876,6 +4934,10 @@ document.addEventListener('click', async function(e){
     render(); return;
   }
   if(action==='pdf-corte'){ abrirPdfCorte(t.dataset.id); return; }
+  if(action==='marcar-arrastre'){
+    await marcarArrastre(t.dataset.prestamo, t.dataset.valor === '1');
+    return;
+  }
   if(action==='previa-corte'){
     STATE.corteMes  = Number(document.getElementById('corte-mes').value);
     STATE.corteAnio = Number(document.getElementById('corte-anio').value);
