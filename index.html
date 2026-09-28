@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '3.1';
+const APP_VERSION = '3.2';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -3312,7 +3312,7 @@ function renderScreen(){
   if(STATE.role==='socio'){
     if(STATE.screen==='cartera') return renderMiCartera();
     if(STATE.screen==='registrar') return renderRegistrarAbono(false);
-    if(STATE.screen==='solicitar') return renderSolicitarPrestamo();
+    if(STATE.screen==='solicitar') return renderSolicitarPrestamo(false);
     if(STATE.screen==='detalle') return renderDetalle(STATE.screenParams.id, false);
     if(STATE.screen==='bandeja') return renderBandeja();
     if(STATE.screen==='mensaje') return renderMensajeAbierto(STATE.screenParams.id);
@@ -3322,7 +3322,7 @@ function renderScreen(){
     if(STATE.screen==='registrarSocio') return renderRegistrarAbono(true);
     if(STATE.screen==='cierreCaja') return renderCierreCaja() + renderTraspasos()
                                         + renderOtrosCargos() + renderArqueo();
-    if(STATE.screen==='solicitudes') return renderSolicitudesAdmin();
+    if(STATE.screen==='solicitudes') return renderSolicitarPrestamo(true) + renderSolicitudesAdmin();
     if(STATE.screen==='tablas') return renderTablas();
     if(STATE.screen==='vencidos') return renderVencidos();
     if(STATE.screen==='mensajes') return renderMensajesAdmin();
@@ -3674,8 +3674,12 @@ function formatDetalleMetodo(metodo, detalle){
   }
   return '';
 }
-function renderSolicitarPrestamo(){
-  const misSolicitudes = SOLICITUDES.filter(s=>s.socio===STATE.socioActivo).slice().reverse();
+function renderSolicitarPrestamo(esAdmin){
+  const socioSel = esAdmin
+    ? (STATE.screenParams.socioSolSel || SEED.socios[0].nombre)
+    : STATE.socioActivo;
+  const misSolicitudes = SOLICITUDES.filter(s=>s.socio===socioSel).slice().reverse();
+  const esPropioAdmin = esAdmin && socioSel === CONFIG.socioAdmin;
   const pillSol = {
     pendiente:'pill-pendiente', aprobada:'pill-cancelado', rechazada:'pill-rechazado'
   };
@@ -3683,9 +3687,20 @@ function renderSolicitarPrestamo(){
   const {colaInfo} = calcColaSolicitudes();
   return `
   <div class="card">
-    <h2>Solicitar préstamo nuevo</h2>
-    <p class="muted">Pide un préstamo nuevo para un cliente. El administrador lo revisa y, si lo aprueba, se crea solo en la tabla de Préstamos.</p>
-    <form data-form="solicitar-prestamo">
+    <h2>${esAdmin ? 'Solicitar préstamo a nombre de un socio' : 'Solicitar préstamo nuevo'}</h2>
+    <p class="muted">${esAdmin
+      ? 'Para cuando el socio te pide el préstamo por fuera de la aplicación. Queda a su nombre y entra a la misma fila que las demás; aprobarla sigue siendo un paso aparte.'
+      : 'Pide un préstamo nuevo para un cliente. El administrador lo revisa y, si lo aprueba, se crea solo en la tabla de Préstamos.'}</p>
+    <form data-form="solicitar-prestamo"${esAdmin ? ' data-como-admin="1"' : ''}>
+      ${esAdmin ? `
+      <div class="field">
+        <label>¿A nombre de cuál socio?</label>
+        <select id="sol-socio">
+          ${SEED.socios.map(x=>`<option value="${x.nombre}" ${x.nombre===socioSel?'selected':''}>${x.nombre}</option>`).join('')}
+        </select>
+      </div>
+      ${esPropioAdmin ? '<div class="notice warn">Este socio sos vos mismo. Requiere segunda revisión antes de aprobarla.</div>' : ''}
+      ` : ''}
       <div class="field"><label>Nombre del cliente</label><input type="text" name="cliente" required placeholder="Nombre completo"></div>
       <div class="grid cols-2">
         <div class="field"><label>Monto solicitado</label><input type="text" inputmode="numeric" class="money-input" name="monto" id="sol-monto" required placeholder="₡0"></div>
@@ -3704,8 +3719,8 @@ function renderSolicitarPrestamo(){
     </form>
   </div>
   <div class="card">
-    <h3>Mis solicitudes</h3>
-    ${misSolicitudes.length===0 ? '<div class="empty">Todavía no has solicitado préstamos.</div>' : misSolicitudes.map(s=>`
+    <h3>${esAdmin ? 'Solicitudes de ' + socioSel : 'Mis solicitudes'}</h3>
+    ${misSolicitudes.length===0 ? `<div class="empty">${esAdmin ? 'Ese socio no tiene solicitudes.' : 'Todavía no has solicitado préstamos.'}</div>` : misSolicitudes.map(s=>`
       <div class="mov-item ${s.estado==='pendiente'?'pendiente':s.estado==='rechazada'?'rechazado':'aprobado'}">
         <div class="mov-top"><span>${s.cliente} · ${formatMoney(s.monto)} a ${s.plazo} meses</span><span class="pill ${pillSol[s.estado]}">${labelSol[s.estado]}</span></div>
         <div class="mov-meta">Solicitado el ${s.fechaSolicitud} · Interés propuesto: ${formatMoney(s.interesPropuesto)}</div>
@@ -5229,6 +5244,7 @@ document.addEventListener('change', function(e){
     return;
   }
   if(e.target.id==='reg-socio'){ STATE.screenParams = {...STATE.screenParams, socioSel:e.target.value}; render(); return; }
+  if(e.target.id==='sol-socio'){ STATE.screenParams = {...STATE.screenParams, socioSolSel:e.target.value}; render(); return; }
   if(e.target.id==='sol-metodo-desembolso'){
     document.getElementById('sol-metodo-detalle').innerHTML = renderSolMetodoDetalle(e.target.value);
     return;
@@ -5562,8 +5578,14 @@ document.addEventListener('submit', async function(e){
     } else if(metodo==='Efectivo'){
       detalleMetodo.entregaDetalle = f.entregaDetalle.value.trim();
     }
-    await crearSolicitud({socio:STATE.socioActivo, cliente, monto, plazo, metodoDesembolso:metodo, nota, detalleMetodo});
-    toast('Solicitud enviada. Queda pendiente de aprobación del administrador.');
+    const comoAdmin = f.dataset.comoAdmin === '1';
+    const aNombreDe = comoAdmin
+      ? (document.getElementById('sol-socio') || {}).value || SEED.socios[0].nombre
+      : STATE.socioActivo;
+    await crearSolicitud({socio:aNombreDe, cliente, monto, plazo, metodoDesembolso:metodo, nota, detalleMetodo});
+    toast(comoAdmin
+      ? 'Solicitud creada a nombre de ' + aNombreDe + '. Falta aprobarla.'
+      : 'Solicitud enviada. Queda pendiente de aprobación del administrador.');
     render();
   }
 });
