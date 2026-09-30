@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '4.2';
+const APP_VERSION = '4.3';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -4838,6 +4838,14 @@ function renderTraspasos(){
 function renderVencidos(){
   const pendientes = prestamosConMoraPendiente();
   const vencidos = SEED.prestamos.filter(p=>calcEstado(p)==='Vencido');
+  /* Los vencidos que todavia no cumplen un mes de atraso. Antes la tabla solo
+     salia cuando NINGUNO tenia mora pendiente: bastaba con que uno la tuviera
+     para que los demas desaparecieran de la pantalla, aunque el aviso de
+     arriba los siguiera contando. */
+  const conTarjeta = new Set(pendientes.map(x => x.p.id));
+  const sinMoraAun = vencidos.filter(p => !conTarjeta.has(p.id))
+    .map(p => ({p, mora: calcMora(p, SEED.fechaCorte)}))
+    .sort((a,b) => b.mora.diasAtraso - a.mora.diasAtraso);
   const totalSugerido = pendientes.reduce((a,x)=>a+x.mora.monto, 0);
   const aplicadas = MORAS.slice().sort((a,b)=>b.numero.localeCompare(a.numero));
 
@@ -4885,10 +4893,20 @@ function renderVencidos(){
          </div>`}
     <p class="muted">La mora no se cobra sola. Vos decidís préstamo por préstamo si la aplicás, por cuántos meses y por cuánto.</p>
     ${tarjetas}
-    ${vencidos.length && !pendientes.length ? `<div class="table-wrap"><table>
-      <thead><tr><th>N°</th><th>Cliente</th><th>Socio</th><th>Venció</th><th>Saldo</th></tr></thead>
-      <tbody>${vencidos.map(p=>`<tr><td>${p.id}</td><td>${p.cliente}</td><td>${p.socio}</td><td>${p.vencimiento}</td><td>${formatMoney(saldoConfirmado(p))}</td></tr>`).join('')}</tbody>
-    </table></div>` : ''}
+    ${sinMoraAun.length ? `
+      <h3 style="margin-top:18px;">Vencidos sin mora que cobrar todavía (${sinMoraAun.length})</h3>
+      <p class="muted" style="font-size:12.5px;">No cumplen un mes completo de atraso, así que
+        por la regla de ${CONFIG.tasaMensual}% mensual no hay nada que cobrarles. La columna de la
+        derecha dice desde qué día se les podría cobrar el primer mes.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>N°</th><th>Cliente</th><th>Socio</th><th>Venció</th><th>Atraso</th><th>Saldo</th><th>Mora a partir del</th></tr></thead>
+        <tbody>${sinMoraAun.map(({p, mora})=>`<tr>
+          <td>${p.id}</td><td>${p.cliente}</td><td>${p.socio}</td><td>${p.vencimiento}</td>
+          <td>${mora.diasAtraso} ${mora.diasAtraso===1?'día':'días'}</td>
+          <td>${formatMoney(mora.saldo)}</td>
+          <td>${formatDMY(addMonthsSameDay(parseDMY(p.vencimiento), 1))}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : ''}
   </div>
 
   <div class="card">
