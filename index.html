@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '3.9';
+const APP_VERSION = '4.0';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -2787,13 +2787,65 @@ function renderBandeja(){
   </div>`;
 }
 
+/* Los cortes enviados, del mas nuevo al mas viejo. Un corte es un documento
+   que se busca meses despues, no un mensaje que se lee una vez, asi que vive
+   aparte de la bandeja aunque sea la misma fila de la base. */
+function reportesEnviados(){
+  /* Se ordena por el periodo que cubre el corte, no por cuando se mando: dos
+     cortes enviados el mismo dia tienen la misma hora al segundo y quedaban
+     al azar, y de todas formas lo que se busca es "el de agosto". */
+  const cuando = m => {
+    const f = m.periodoFin ? parseDMY(m.periodoFin) : null;
+    return f && !isNaN(f) ? f.getTime() : 0;
+  };
+  return mensajesParaMi()
+    .filter(m => m.tipo === 'corte_mensual' && m.datos)
+    .slice()
+    .sort((a,b) => (cuando(b) - cuando(a))
+                || String(b.creadoEn || '').localeCompare(String(a.creadoEn || ''))
+                || String(b.numero  || '').localeCompare(String(a.numero  || '')));
+}
+function renderReportes(){
+  const reportes = reportesEnviados();
+  return `
+  <div class="card">
+    <h2>Reportes</h2>
+    <p class="muted">Los cortes que ha enviado la administración. Las cifras de cada uno
+      quedaron congeladas el día que se envió: abrir el de enero en marzo muestra
+      exactamente lo que se vio en enero.</p>
+    ${reportes.length === 0 ? '<div class="empty">Todavía no se ha enviado ningún corte.</div>' : ''}
+    ${reportes.map(m => {
+      const nuevo = !loLei(m.id);
+      const u = m.datos.utilidad || {};
+      const per = (m.datos.periodo && m.datos.periodo.etiqueta) || m.titulo;
+      return `<div class="acceso-item" style="${nuevo ? 'border-left:3px solid var(--verde);' : ''}">
+        <div class="acceso-top">
+          <div>
+            <div class="acceso-nombre">${escapaHtml(per)}${nuevo ? ' <span class="pill pill-pendiente">Sin leer</span>' : ''}</div>
+            <div class="muted" style="font-size:12.5px;">${[m.numero, fechaDeMensaje(m) ? 'enviado el ' + fechaDeMensaje(m) : ''].filter(Boolean).join(' · ')}</div>
+          </div>
+        </div>
+        <div class="cifras" style="margin:6px 0 2px;">
+          <div class=""><span class="k">Utilidad prudente</span><span class="v">${formatMoney(u.prudenteAcum || 0)}<small>${formatMoney(u.porSocio || 0)} por socio</small></span></div>
+        </div>
+        <div class="acceso-botones no-print">
+          <button class="btn btn-primary btn-sm" data-action="abrir-mensaje" data-id="${m.id}" data-desde="reportes">Ver el corte</button>
+          <button class="btn btn-ghost btn-sm" data-action="pdf-corte" data-id="${m.id}">PDF</button>
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
 function renderMensajeAbierto(id){
   const m = MENSAJES.find(x => mismoId(x.id, id));
   if(!m) return '<div class="card"><div class="empty">Ese mensaje ya no está.</div></div>';
   const det = detalleDeMensaje(m.id, STATE.socioId);
+  // Se vuelve a la pantalla de donde se entro, no siempre a la bandeja.
+  const desde = STATE.screenParams.desde === 'reportes' ? 'reportes' : 'bandeja';
   return `
   <div class="card">
-    <button class="btn btn-ghost btn-sm no-print" data-action="goto" data-screen="bandeja">← Volver a la bandeja</button>
+    <button class="btn btn-ghost btn-sm no-print" data-action="goto" data-screen="${desde}">← Volver a ${desde === 'reportes' ? 'los reportes' : 'la bandeja'}</button>
     <h2 style="margin-top:10px;">${m.titulo}</h2>
     <p class="muted">${[m.numero, fechaDeMensaje(m), m.creadoPor].filter(Boolean).join(' · ')}</p>
     ${m.cuerpo ? `<p style="white-space:pre-wrap;">${m.cuerpo}</p>` : ''}
@@ -3402,7 +3454,7 @@ const ADMIN_TABS = [
   ['tablero','Tablero'], ['aprobar','Por aprobar'], ['registrarSocio','Registrar a nombre de socio'],
   ['cierreCaja','Cierre de caja'], ['solicitudes','Solicitudes de préstamo'], ['tablas','Tablas'], ['vencidos','Vencidos'], ['mensajes','Mensajes'], ['accesos','Accesos'], ['config','Configuración']
 ];
-const SOCIO_TABS = [ ['cartera','Mi cartera'], ['registrar','Registrar abono'], ['solicitar','Solicitar préstamo'], ['bandeja','Bandeja'] ];
+const SOCIO_TABS = [ ['cartera','Mi cartera'], ['registrar','Registrar abono'], ['solicitar','Solicitar préstamo'], ['reportes','Reportes'], ['bandeja','Bandeja'] ];
 
 function renderTabs(){
   const tabs = STATE.role==='admin' ? ADMIN_TABS : SOCIO_TABS;
@@ -3412,7 +3464,7 @@ function renderTabs(){
 }
 function renderBottomNav(){
   if(STATE.role!=='socio') return renderBottomNavAdmin();
-  const icons = {cartera:'📋', registrar:'➕', solicitar:'💵', bandeja:'✉️'};
+  const icons = {cartera:'📋', registrar:'➕', solicitar:'💵', reportes:'📈', bandeja:'✉️'};
   const pendientes = sinLeer();
   return `<div class="bottom-nav no-print">
     ${SOCIO_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}" data-action="goto" data-screen="${id}"><span class="ic">${icons[id]}${id==='bandeja'&&pendientes?`<span class="globo">${pendientes}</span>`:''}</span>${label}</button>`).join('')}
@@ -3432,6 +3484,7 @@ function renderScreen(){
     if(STATE.screen==='solicitar') return renderSolicitarPrestamo(false);
     if(STATE.screen==='detalle') return renderDetalle(STATE.screenParams.id, false);
     if(STATE.screen==='bandeja') return renderBandeja();
+    if(STATE.screen==='reportes') return renderReportes();
     if(STATE.screen==='mensaje') return renderMensajeAbierto(STATE.screenParams.id);
   } else {
     if(STATE.screen==='tablero') return renderTablero();
@@ -3442,7 +3495,8 @@ function renderScreen(){
     if(STATE.screen==='solicitudes') return renderSolicitarPrestamo(true) + renderSolicitudesAdmin();
     if(STATE.screen==='tablas') return renderTablas();
     if(STATE.screen==='vencidos') return renderVencidos();
-    if(STATE.screen==='mensajes') return renderMensajesAdmin();
+    if(STATE.screen==='mensajes') return renderMensajesAdmin() + renderReportes();
+    if(STATE.screen==='reportes') return renderReportes();
     if(STATE.screen==='mensaje') return renderMensajeAbierto(STATE.screenParams.id);
     if(STATE.screen==='accesos') return renderAccesos();
     if(STATE.screen==='config') return renderConfig();
@@ -5087,7 +5141,7 @@ document.addEventListener('click', async function(e){
   if(action==='pdf-guia'){ abrirPdfGuia(); return; }
   if(action==='abrir-mensaje'){
     await marcarLeido(t.dataset.id);
-    STATE.screen = 'mensaje'; STATE.screenParams = {id: t.dataset.id};
+    STATE.screen = 'mensaje'; STATE.screenParams = {id: t.dataset.id, desde: t.dataset.desde || 'bandeja'};
     render(); return;
   }
   if(action==='pdf-corte'){ abrirPdfCorte(t.dataset.id); return; }
