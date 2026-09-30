@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '3.6';
+const APP_VERSION = '3.7';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -2291,8 +2291,6 @@ function construirPdfCorte(m, mio){
       fila('Gastos financieros', '- ' + pdfMoney(g.tesoreria.gastosFinancieros));
     if(g.tesoreria && g.tesoreria.cargosAlCliente)
       fila('Trasladado a los clientes', pdfMoney(g.tesoreria.cargosAlCliente));
-    if(g.tesoreria && g.tesoreria.ajustes)
-      fila('Ajustes de arqueo', pdfMoney(g.tesoreria.ajustes));
     fila('Utilidad prudente', pdfMoney(g.utilidad.prudenteAcum)
          + '   (' + pdfMoney(g.utilidad.porSocio) + ' por socio)', true);
     c.bajar(4);
@@ -2300,6 +2298,30 @@ function construirPdfCorte(m, mio){
       + 'capital prestado, y solo lo que entra por encima cuenta como ganancia. '
       + 'Se reparte en partes iguales entre los ' + (g.utilidad.socios || 0)
       + ' socios, venga de la cartera que venga.',
+      pageW - margen*2, 8).forEach(l => {
+        c.asegurarEspacio(12); c.ops.push(GRIS);
+        c.texto(l, 8, 'F1', margen); c.ops.push(NEGRO); c.bajar(11);
+      });
+  }
+
+  /* El ajuste del arqueo va aparte, no pegado a la utilidad: no es ni
+     perdida ni ganancia, y puesto ahi arriba parecia que se la comia. */
+  if(g.tesoreria && g.tesoreria.ajustes){
+    titulo('TESORERIA');
+    fila('Disponible al ' + g.periodo.hasta, pdfMoney(g.tesoreria.caja));
+    (g.tesoreria.arqueos || []).filter(a => a.diferencia).forEach(a => {
+      fila('Ajuste del arqueo ' + a.numero + ' - ' + a.fecha, pdfMoney(a.diferencia));
+      pdfEnvolver(a.motivo, pageW - margen*2 - 14, 8).forEach(l => {
+        c.asegurarEspacio(12); c.ops.push(GRIS);
+        c.texto(l, 8, 'F1', margen + 14); c.ops.push(NEGRO); c.bajar(10);
+      });
+    });
+    fila('Ajuste aplicado al disponible', pdfMoney(g.tesoreria.ajustes), true);
+    c.bajar(4);
+    pdfEnvolver('El ajuste cuadra el disponible con la plata que de verdad hay '
+      + 'contada. No es perdida ni ganancia y no toca la utilidad: la utilidad '
+      + 'son los intereses cobrados menos la reserva, nada mas. Viene de como '
+      + 'arranco el periodo, no de plata que se haya perdido.',
       pageW - margen*2, 8).forEach(l => {
         c.asegurarEspacio(12); c.ops.push(GRIS);
         c.texto(l, 8, 'F1', margen); c.ops.push(NEGRO); c.bajar(11);
@@ -2664,7 +2686,6 @@ function renderCifrasCorte(g, mio){
       ${g.tesoreria && g.tesoreria.interesArrastrado ? `<div class=""><span class="k">Interés de préstamos del periodo anterior<br><small>${g.tesoreria.prestamosArrastrados} préstamo(s), no cuentan acá</small></span><span class="v">${formatMoney(g.tesoreria.interesArrastrado)}</span></div>` : ''}
       ${g.tesoreria && g.tesoreria.gastosFinancieros ? `<div class=""><span class="k">Gastos financieros</span><span class="v">− ${formatMoney(g.tesoreria.gastosFinancieros)}</span></div>` : ''}
       ${g.tesoreria && g.tesoreria.cargosAlCliente ? `<div class=""><span class="k">Trasladado a los clientes</span><span class="v">${formatMoney(g.tesoreria.cargosAlCliente)}</span></div>` : ''}
-      ${g.tesoreria && g.tesoreria.ajustes ? `<div class=""><span class="k">Ajustes de arqueo</span><span class="v">${formatMoney(g.tesoreria.ajustes)}</span></div>` : ''}
       <div class="fuerte"><span class="k">Utilidad prudente</span><span class="v">${formatMoney(g.utilidad.prudenteAcum)}<small>${formatMoney(g.utilidad.porSocio)} por socio</small></span></div>
       </div>
     <p class="muted" style="font-size:12.5px;">
@@ -2673,6 +2694,21 @@ function renderCifrasCorte(g, mio){
       Se reparte <b>en partes iguales entre los ${g.utilidad.socios || 0} socios</b>,
       venga de la cartera que venga.
     </p>
+
+    ${g.tesoreria && g.tesoreria.ajustes ? `
+      <h3>Tesorería</h3>
+      <div class="cifras">
+        <div class=""><span class="k">Disponible al ${g.periodo.hasta}</span><span class="v">${formatMoney(g.tesoreria.caja)}</span></div>
+        ${(g.tesoreria.arqueos || []).filter(a=>a.diferencia).map(a=>
+          `<div class=""><span class="k">Ajuste del arqueo ${a.numero} · ${a.fecha}<br><small>${a.motivo}</small></span><span class="v">${formatMoney(a.diferencia)}</span></div>`).join('')}
+        <div class=""><span class="k">Ajuste aplicado al disponible</span><span class="v">${formatMoney(g.tesoreria.ajustes)}</span></div>
+      </div>
+      <p class="muted" style="font-size:12.5px;">
+        El ajuste cuadra el disponible con la plata que de verdad hay contada.
+        <b>No es pérdida ni ganancia</b> y no toca la utilidad de arriba: la
+        utilidad son los intereses cobrados menos la reserva, nada más.
+        Viene de cómo arrancó el periodo, no de plata que se haya perdido.
+      </p>` : ''}
 
     ${mio ? `
       <h3>Tu cartera</h3>
