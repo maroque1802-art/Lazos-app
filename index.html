@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '3.8';
+const APP_VERSION = '3.9';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -2728,9 +2728,7 @@ function renderCifrasCorte(g, mio){
         <div class=""><span class="k">Lo que el sistema calculaba a esa fecha</span><span class="v">${formatMoney(g.tesoreria.arqueo.calculado)}</span></div>` : ''}
         <div class="fuerte"><span class="k">Ajuste aplicado al disponible</span><span class="v">${formatMoney(g.tesoreria.ajustes)}</span></div>
       </div>
-      ${g.tesoreria.arqueo && g.tesoreria.arqueo.motivo ? `<p class="muted" style="font-size:12.5px; overflow-wrap:anywhere;">
-        <b>Motivo anotado:</b> ${escapaHtml(g.tesoreria.arqueo.motivo)}
-      </p>` : ''}
+      ${g.tesoreria.arqueo && g.tesoreria.arqueo.motivo ? `<p class="muted" style="font-size:12.5px; overflow-wrap:anywhere; white-space:pre-wrap;"><b>Motivo anotado:</b> ${escapaHtml(g.tesoreria.arqueo.motivo)}</p>` : ''}
       <p class="muted" style="font-size:12.5px;">
         El ajuste cuadra el disponible con la plata que de verdad hay contada.
         <b>No es pérdida ni ganancia</b> y no toca la utilidad de arriba: la
