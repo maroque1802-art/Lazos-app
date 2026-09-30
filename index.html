@@ -131,6 +131,35 @@ select{min-width:150px;}
 .demo-warning{
   background:var(--warning-bg); color:var(--warning); font-size:12.5px; padding:8px 16px; text-align:center; border-bottom:1px solid var(--border);
 }
+/* ---------- menu lateral (administrador) ----------
+   Diez pestanas no caben en una barra: de lado hay sitio de sobra y la
+   pantalla queda para los datos. */
+.menu-lat{
+  position:fixed; top:0; left:0; bottom:0; width:66px; z-index:60;
+  background:var(--card); border-right:1px solid var(--border); box-shadow:var(--shadow);
+  display:flex; flex-direction:column; align-items:center; gap:4px;
+  padding:10px 0; overflow-y:auto;
+  transform:translateX(-100%); transition:transform .18s ease;
+}
+.menu-lat.abierto{transform:none;}
+.menu-lat button{
+  width:48px; height:48px; flex:0 0 auto; border:none; background:none; cursor:pointer;
+  border-radius:14px; font-size:21px; line-height:1; color:var(--text-muted);
+  display:flex; align-items:center; justify-content:center;
+}
+.menu-lat button.active{background:var(--c-primary); color:#fff;}
+.menu-lat .sep{width:34px; height:1px; background:var(--border); margin:4px 0; flex:0 0 auto;}
+.menu-fondo{position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:55; border:none; padding:0;}
+@media (prefers-reduced-motion: reduce){ .menu-lat{transition:none;} }
+
+/* ---------- avatar del perfil ---------- */
+.avatar{
+  width:36px; height:36px; border-radius:50%; flex:0 0 auto;
+  background:var(--c-primary); color:#fff; font-weight:800; font-size:13.5px;
+  display:flex; align-items:center; justify-content:center; letter-spacing:.5px;
+}
+.avatar.bot{background:var(--info-bg); color:var(--info); font-size:18px;}
+
 /* ---------- nav tabs ---------- */
 nav.tabs{display:flex; gap:4px; overflow-x:auto; padding:0 8px 8px; scrollbar-width:thin;}
 nav.tabs::-webkit-scrollbar{height:4px;}
@@ -460,7 +489,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '4.3';
+const APP_VERSION = '4.4';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -504,6 +533,8 @@ const STATE = {
   errorCarga: '',
   screen: 'inicio',
   screenParams: {},
+  menu: false,           // el menu lateral del administrador
+
   filtroEstado: 'todos',
   busquedaCartera: '',
   historialDesde: '',
@@ -2989,7 +3020,7 @@ function socioLoans(socioNombre){
    DISPATCH DE ACCIONES
    ========================================================= */
 function goto(screen, params={}){
-  STATE.screen = screen; STATE.screenParams = params; STATE.modal = null;
+  STATE.screen = screen; STATE.screenParams = params; STATE.modal = null; STATE.menu = false;
   render();
   window.scrollTo({top:0, behavior:'instant'});
 }
@@ -3340,9 +3371,13 @@ function render(){
     attachFormRefs();
     return;
   }
-  app.innerHTML = renderHeader() + renderTabs()
+  /* El administrador navega por el menu lateral; el socio, con sus pestanas
+     arriba en escritorio y la barra de abajo en el telefono. */
+  const esAdmin = STATE.role === 'admin';
+  app.innerHTML = renderHeader()
+    + (esAdmin ? renderMenuLateral() : renderTabs())
     + `<main class="container">${renderScreen()}${renderPieLegal()}</main>`
-    + renderBottomNav() + renderModal();
+    + (esAdmin ? '' : renderBottomNav()) + renderModal();
 }
 
 /* La marca va FUERA de la tarjeta: la tarjeta es el formulario, no el letrero.
@@ -3434,15 +3469,57 @@ function renderPieLegal(){
   </footer>`;
 }
 
+/* Las dos iniciales del perfil, para el circulito de la cabecera.
+   La cuenta del robot que manda el corte no lleva iniciales: lleva su cara,
+   para que se note de una que ese movimiento no lo hizo una persona. */
+function inicialesDe(texto){
+  const limpio = String(texto || '').replace(/[._+-]+/g, ' ').replace(/\d+/g, ' ').trim();
+  if(!limpio) return '?';
+  const partes = limpio.split(/\s+/).filter(Boolean);
+  const letras = partes.length >= 2 ? partes[0][0] + partes[1][0] : limpio.slice(0, 2);
+  return letras.toUpperCase();
+}
+function identidadPerfil(){
+  const correo = (STATE.sesion && STATE.sesion.user && STATE.sesion.user.email) || '';
+  const esBot = /\+bot@/i.test(correo) || /^bot@/i.test(correo);
+  const nombre = STATE.socioActivo || correo.split('@')[0] || '';
+  return {
+    correo, esBot, nombre,
+    iniciales: esBot ? '🤖' : inicialesDe(nombre),
+    titulo: esBot
+      ? 'Cuenta automática · es la que envía el corte mensual'
+      : [nombre, correo].filter(Boolean).join(' · ')
+  };
+}
+
+/* El menu del administrador: solo los iconos, como abajo pero de lado. */
+function renderMenuLateral(){
+  const iconos = ICONOS_ADMIN;
+  return `
+  ${STATE.menu ? '<button class="menu-fondo no-print" data-action="cerrar-menu" aria-label="Cerrar el menú"></button>' : ''}
+  <nav class="menu-lat no-print${STATE.menu ? ' abierto' : ''}" aria-label="Secciones">
+    <button data-action="cerrar-menu" title="Cerrar el menú" aria-label="Cerrar el menú">✕</button>
+    <div class="sep"></div>
+    ${ADMIN_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}"
+        data-action="goto" data-screen="${id}" title="${label}" aria-label="${label}"
+        ${STATE.screen===id?'aria-current="page"':''}>${iconos[id]}</button>`).join('')}
+  </nav>`;
+}
+
 function renderHeader(){
   const roleLabel = STATE.role==='admin' ? 'Administrador' : STATE.socioActivo;
+  const yo = identidadPerfil();
   return `
   <header class="topbar">
     <div class="topbar-inner">
+      ${STATE.role==='admin' ? `<button class="icon-btn no-print" data-action="toggle-menu"
+        title="Secciones" aria-label="Abrir el menú de secciones" aria-expanded="${STATE.menu}">☰</button>` : ''}
       <div class="logo">${svgLogo(34)}<div class="tagline">Tu punto de apoyo para seguir adelante</div></div>
       <div class="spacer"></div>
       <span class="badge-corte">Datos al ${SEED.fechaCorte}</span>
       <div class="role-controls">
+        <span class="avatar${yo.esBot?' bot':''}" title="${escapaHtml(yo.titulo)}"
+              aria-label="${escapaHtml(yo.titulo)}">${yo.iniciales}</span>
         <span class="pill pill-vigente">${roleLabel}</span>
         <button class="icon-btn" data-action="toggle-theme" title="Cambiar modo claro/oscuro">${document.documentElement.getAttribute('data-theme')==='dark' ? '☀️' : '🌙'}</button>
         <button class="btn btn-ghost btn-sm" data-action="salir">Salir</button>
@@ -3464,19 +3541,15 @@ function renderTabs(){
   </nav>`;
 }
 function renderBottomNav(){
-  if(STATE.role!=='socio') return renderBottomNavAdmin();
   const icons = {cartera:'📋', registrar:'➕', solicitar:'💵', reportes:'📈', bandeja:'✉️'};
   const pendientes = sinLeer();
   return `<div class="bottom-nav no-print">
     ${SOCIO_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}" data-action="goto" data-screen="${id}"><span class="ic">${icons[id]}${id==='bandeja'&&pendientes?`<span class="globo">${pendientes}</span>`:''}</span>${label}</button>`).join('')}
   </div>`;
 }
-function renderBottomNavAdmin(){
-  const icons = {tablero:'📊', aprobar:'✅', registrarSocio:'➕', cierreCaja:'💰', solicitudes:'📥', tablas:'📑', vencidos:'⏰', mensajes:'✉️', accesos:'👤', config:'⚙️'};
-  return `<div class="bottom-nav no-print">
-    ${ADMIN_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}" data-action="goto" data-screen="${id}"><span class="ic">${icons[id]}</span></button>`).join('')}
-  </div>`;
-}
+/* Los mismos iconos que tenia la barra de abajo, ahora en el menu lateral. */
+const ICONOS_ADMIN = {tablero:'📊', aprobar:'✅', registrarSocio:'➕', cierreCaja:'💰',
+  solicitudes:'📥', tablas:'📑', vencidos:'⏰', mensajes:'✉️', accesos:'👤', config:'⚙️'};
 
 function renderScreen(){
   if(STATE.role==='socio'){
@@ -5244,6 +5317,8 @@ document.addEventListener('click', async function(e){
   }
   if(action==='filtro-estado'){ STATE.filtroEstado = t.dataset.val; render(); return; }
   if(action==='tabla-tab'){ STATE.screenParams = {tabla:t.dataset.val}; render(); return; }
+  if(action==='toggle-menu'){ STATE.menu = !STATE.menu; render(); return; }
+  if(action==='cerrar-menu'){ STATE.menu = false; render(); return; }
   if(action==='toggle-theme'){
     const html = document.documentElement;
     const cur = html.getAttribute('data-theme');
