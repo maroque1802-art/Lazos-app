@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '3.7';
+const APP_VERSION = '3.8';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -1171,6 +1171,12 @@ function totalDesembolsado(){ return SEED.prestamos.reduce((s,p)=>s+p.monto,0); 
    Sinpe Móvil y Transferencia mueven dinero bancario; Efectivo mueve caja.
    Saber en cuál bolsa está el dinero decide por qué método se puede
    desembolsar un préstamo nuevo. */
+/* Lo que escribe una persona no se pega crudo en el innerHTML. */
+function escapaHtml(t){
+  return String(t == null ? '' : t)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
 function esMetodoEfectivo(metodo){ return metodo === 'Efectivo'; }
 function abonosConfirmadosPorBolsa(){
   let efectivo = 0, bancos = 0;
@@ -2309,14 +2315,19 @@ function construirPdfCorte(m, mio){
   if(g.tesoreria && g.tesoreria.ajustes){
     titulo('TESORERIA');
     fila('Disponible al ' + g.periodo.hasta, pdfMoney(g.tesoreria.caja));
-    (g.tesoreria.arqueos || []).filter(a => a.diferencia).forEach(a => {
-      fila('Ajuste del arqueo ' + a.numero + ' - ' + a.fecha, pdfMoney(a.diferencia));
-      pdfEnvolver(a.motivo, pageW - margen*2 - 14, 8).forEach(l => {
-        c.asegurarEspacio(12); c.ops.push(GRIS);
-        c.texto(l, 8, 'F1', margen + 14); c.ops.push(NEGRO); c.bajar(10);
-      });
-    });
+    const aqV = g.tesoreria.arqueo;
+    if(aqV){
+      fila('Contado en el arqueo ' + aqV.numero + ' - ' + aqV.fecha, pdfMoney(aqV.contado));
+      fila('Lo que el sistema calculaba a esa fecha', pdfMoney(aqV.calculado));
+    }
     fila('Ajuste aplicado al disponible', pdfMoney(g.tesoreria.ajustes), true);
+    if(aqV && aqV.motivo){
+      c.bajar(4);
+      pdfEnvolver('Motivo anotado: ' + aqV.motivo, pageW - margen*2, 8).forEach(l => {
+        c.asegurarEspacio(12); c.ops.push(GRIS);
+        c.texto(l, 8, 'F1', margen); c.ops.push(NEGRO); c.bajar(11);
+      });
+    }
     c.bajar(4);
     pdfEnvolver('El ajuste cuadra el disponible con la plata que de verdad hay '
       + 'contada. No es perdida ni ganancia y no toca la utilidad: la utilidad '
@@ -2605,6 +2616,19 @@ function calcularCorteMensual(anio, mes){
                 ajustes: Math.round(ajustes),
                 gastosFinancieros: Math.round(costosAcum),
                 cargosAlCliente: Math.round(cargosAlClienteAcum),
+                /* El arqueo en vigor, recalculado contra el pasado de hoy.
+                   El numero que quedo guardado envejece en cuanto cambia algo
+                   anterior a su fecha: el de Sonia mostraba -202.000 al lado
+                   de un ajuste de -97.000, y los dos eran el mismo hecho. */
+                arqueo: (() => {
+                  const aq = ultimoArqueoHasta(hasta);
+                  if(!aq) return null;
+                  const r = disponibleReconstruido(parseDMY(aq.fecha));
+                  const contado = Math.round(aq.efectivo + aq.bancos);
+                  const calculado = Math.round(r.efectivo + r.bancos);
+                  return {numero: aq.numero, fecha: aq.fecha, motivo: aq.motivo || '',
+                          contado, calculado, diferencia: contado - calculado};
+                })(),
                 arqueos: ARQUEOS.filter(a => parseDMY(a.fecha) <= hasta).map(a => ({
                   numero: a.numero, fecha: a.fecha, motivo: a.motivo,
                   diferencia: Math.round((a.efectivo + a.bancos)
@@ -2699,10 +2723,14 @@ function renderCifrasCorte(g, mio){
       <h3>Tesorería</h3>
       <div class="cifras">
         <div class=""><span class="k">Disponible al ${g.periodo.hasta}</span><span class="v">${formatMoney(g.tesoreria.caja)}</span></div>
-        ${(g.tesoreria.arqueos || []).filter(a=>a.diferencia).map(a=>
-          `<div class=""><span class="k">Ajuste del arqueo ${a.numero} · ${a.fecha}<br><small>${a.motivo}</small></span><span class="v">${formatMoney(a.diferencia)}</span></div>`).join('')}
-        <div class=""><span class="k">Ajuste aplicado al disponible</span><span class="v">${formatMoney(g.tesoreria.ajustes)}</span></div>
+        ${g.tesoreria.arqueo ? `
+        <div class=""><span class="k">Contado en el arqueo ${g.tesoreria.arqueo.numero} · ${g.tesoreria.arqueo.fecha}</span><span class="v">${formatMoney(g.tesoreria.arqueo.contado)}</span></div>
+        <div class=""><span class="k">Lo que el sistema calculaba a esa fecha</span><span class="v">${formatMoney(g.tesoreria.arqueo.calculado)}</span></div>` : ''}
+        <div class="fuerte"><span class="k">Ajuste aplicado al disponible</span><span class="v">${formatMoney(g.tesoreria.ajustes)}</span></div>
       </div>
+      ${g.tesoreria.arqueo && g.tesoreria.arqueo.motivo ? `<p class="muted" style="font-size:12.5px; overflow-wrap:anywhere;">
+        <b>Motivo anotado:</b> ${escapaHtml(g.tesoreria.arqueo.motivo)}
+      </p>` : ''}
       <p class="muted" style="font-size:12.5px;">
         El ajuste cuadra el disponible con la plata que de verdad hay contada.
         <b>No es pérdida ni ganancia</b> y no toca la utilidad de arriba: la
