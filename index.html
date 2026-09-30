@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '3.5';
+const APP_VERSION = '3.6';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -1043,13 +1043,23 @@ function diasEspera(m){
   return Math.max(0, daysBetween(parseDMY(m.fecha), todayCutoff()));
 }
 
-/* ¿Este abono cancela el préstamo antes del vencimiento?
-   Solo entonces se perdonan intereses: un abono parcial dentro del plazo no
-   da rebaja. Se compara contra el saldo menos la propia rebaja, que es lo
-   que el cliente tendría que traer ese día para saldar.
-   El peso de 1 colón es para no pelear con el redondeo. */
-function cancelaAnticipado(p, monto, rebaja, suger){
-  return suger.aplica && monto >= (saldoConfirmado(p) - rebaja - 1);
+/* Cuánta rebaja haría falta para que ESTE abono cancele el préstamo.
+   La sugerida es el TOPE que permite la política, no lo que hay que rebajar.
+   Si el cliente paga 34.000 de un saldo de 45.000, para cancelar faltan
+   11.000: rebajarle los 15.000 del tope lo deja pagando 4.000 de más.
+   `alcanza` no es una promesa: dice que con una rebaja dentro del tope el
+   préstamo quedaría saldado. Darla o no la decide el administrador. */
+function rebajaParaCancelar(p, monto, suger){
+  const saldo = saldoConfirmado(p);
+  const tope = Math.round(suger.rebajaSugerida || 0);
+  const necesaria = Math.round(saldo - monto);
+  return {
+    saldo, tope,
+    necesaria: Math.max(0, necesaria),
+    alcanza: !!suger.aplica && necesaria >= 0 && necesaria <= tope,
+    sobrepago: Math.max(0, -necesaria),
+    faltante: Math.max(0, necesaria - tope)
+  };
 }
 
 /* Cuánta mora le toca a un préstamo vencido hoy.
@@ -1864,7 +1874,19 @@ const GUIA_PASOS = [
       'Tocá "Registrar abono".'
     ],
     aviso:'La fecha importa de verdad. Con ella se calculan los intereses y si al cliente le toca rebaja por pagar antes del vencimiento. Si ponés la de hoy cuando pagó hace tres días, el cálculo sale mal.',
-    cola:'Mientras escribís el monto, debajo aparece un aviso que te dice cuánto le quedaría debiendo, y si con ese pago el préstamo queda cancelado y cuánta rebaja de intereses le corresponde.' },
+    cola:'Mientras escribís el monto, debajo aparece un aviso que te dice cuánto le quedaría debiendo. Ojo: un abono grande, por sí solo, no cancela el préstamo. Para eso está el paso siguiente.' },
+
+  { titulo:'Adelantar la cancelación de un préstamo',
+    intro:'Cuando un cliente quiere quedar al día antes del vencimiento, el cálculo se pide primero y con ese número se le cobra. Nunca al revés.',
+    pasos:[
+      'Entrá al préstamo desde "Mi cartera".',
+      'Bajá hasta el botón "Adelantar cancelación" y tocalo.',
+      'Te sale el monto exacto que tiene que traer ese día, el saldo de hoy y cuánta rebaja de intereses lo explica.',
+      'Si va a pagar otro día, poné esa fecha en el campo de al lado: el monto cambia.',
+      'Pedile al cliente ese monto y registrá el abono por lo que te entregó.'
+    ],
+    aviso:'El cálculo vale para la fecha que elegiste. Si el cliente paga una semana después, volvé a pedirlo: el monto sube porque corrió otro mes de interés.',
+    cola:'La rebaja no se aplica sola. La confirma la administración al aprobar el abono, así que registrá el monto exacto que recibiste y no le prometás al cliente que ya quedó cancelado hasta que el abono esté aprobado.' },
 
   { titulo:'Qué significa cada estado',
     intro:'Un abono que registrás no baja el saldo todavía. Primero lo revisa la administración.',
@@ -2835,10 +2857,14 @@ function svgLogo(height){
   const width = Math.round(height * LOGO_PROPORCION);
   return `<span class="logo-placa"><img src="${LOGO_DATA_URI}" alt="Lazos" width="${width}" height="${height}" style="display:block;"></span>`;
 }
+let _toastTimer = null;
 function toast(msg){
   const holder = document.getElementById('toast-holder');
   holder.innerHTML = `<div id="toast">${msg}</div>`;
-  setTimeout(()=>{ if(holder.firstChild) holder.innerHTML=''; }, 2600);
+  // Sin limpiar el temporizador anterior, el aviso viejo se llevaba al nuevo
+  // cuando salian con menos de 2,6 segundos de diferencia.
+  if(_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(()=>{ holder.innerHTML=''; _toastTimer = null; }, 2600);
 }
 function socioLoans(socioNombre){
   return SEED.prestamos.filter(p => p.socio === socioNombre);
@@ -2918,10 +2944,10 @@ async function confirmarCaja(movId, montoFinal, motivo, rebajaFinal){
 
   const cambios = { estado:'aprobado_caja', aprobado_por:'Administrador (cierre de caja)',
                     aprobado_en: dmyAIso(SEED.fechaCorte) };
-  if(montoFinal !== undefined && Math.round(montoFinal) !== m.monto){
-    cambios.monto = Math.round(montoFinal);
-    if(motivo) cambios.motivo_ajuste = motivo;
-  }
+  if(montoFinal !== undefined && Math.round(montoFinal) !== m.monto) cambios.monto = Math.round(montoFinal);
+  // El motivo se guarda siempre que lo hubo: tambien cuando lo unico que
+  // cambio fue la rebaja. Antes se pedia y se tiraba a la basura.
+  if(motivo) cambios.motivo_ajuste = motivo;
   // Siempre se escribe, incluso cuando queda en cero: la rebaja que traía el
   // movimiento desde que se registró puede haber dejado de corresponder.
   if(rebajaFinal !== undefined) cambios.rebaja_aplicada = Math.round(rebajaFinal);
@@ -2944,12 +2970,20 @@ function revisarRebajaCaja(movId){
   const suger  = Number(inpMonto.dataset.suger) || 0;
   const saldo  = Number(inpMonto.dataset.saldo) || 0;
   const monto  = parseMoneyInputValue(inpMonto.value);
+  const necesaria = Math.max(0, Math.round(saldo - monto));
   const alcanza = monto >= (saldo - suger - 1);
 
   if(alcanza){
     wrap.style.display = '';
-    if(parseMoneyInputValue(inpReb.value) === 0) inpReb.value = moneyInputValue(suger);
-    if(aviso) aviso.innerHTML = '';
+    /* No se rellena sola. Antes se ponia el tope completo de la politica, y
+       con un abono que no saldaba el saldo eso dejaba al cliente pagando de
+       mas: 34.000 de abono + 15.000 de rebaja contra un saldo de 45.000. La
+       rebaja la escribe el administrador, y aqui solo se le dice cuanta hace
+       falta de verdad. */
+    const puesta = parseMoneyInputValue(inpReb.value);
+    if(aviso) aviso.innerHTML = puesta > necesaria
+      ? `<div class="notice warn">Esa rebaja pasa por ${formatMoney(puesta - necesaria)} lo que hace falta: con ${formatMoney(monto)} basta rebajar <b>${formatMoney(necesaria)}</b> para saldar el préstamo.</div>`
+      : '';
   }else{
     wrap.style.display = 'none';
     inpReb.value = moneyInputValue(0);
@@ -3492,15 +3526,41 @@ function renderMovItem(m, esAdmin){
   </div>`;
 }
 
+/* El camino para cancelar antes del vencimiento empieza AQUI, no en el abono.
+   El socio pide el calculo, ve el monto exacto y con ese numero le pide el
+   pago al cliente. Un abono grande por si solo no cancela nada: la rebaja la
+   aplica el administrador cuando aprueba el abono. */
 function renderSimuladorCancelacion(p){
   return `<div class="card no-print">
-    <h3>Simulador de cancelación anticipada</h3>
-    <p class="muted">Elige una fecha hipotética de pago para ver cuánto pagaría el cliente ese día y la rebaja sugerida por adelantar meses de interés.</p>
-    <div class="field">
-      <label>Fecha de pago a simular</label>
-      <input type="date" id="sim-fecha" data-prestamo="${p.id}">
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
+      <button class="btn btn-primary btn-sm" data-action="calcular-cancelacion" data-prestamo="${p.id}">Adelantar cancelación</button>
+      <div class="field" style="margin:0; flex:1; min-width:170px;">
+        <label>O para otra fecha de pago</label>
+        <input type="date" id="sim-fecha" data-prestamo="${p.id}">
+      </div>
     </div>
     <div id="sim-resultado"></div>
+  </div>`;
+}
+
+/* Un solo lugar arma el resultado, lo pida el boton o la fecha. */
+function resultadoCancelacion(p, fechaStr){
+  const r = calcCancelacionAnticipada(p, fechaStr);
+  if(!r.aplica){
+    return `<div class="notice warn" style="margin-top:10px;">Para pagos del ${fechaStr} no hay rebaja
+      (faltan menos de ${CONFIG.umbralDias} días para el vencimiento, o ya se cobraron los ${p.plazo} meses).
+      El cliente tendría que pagar el saldo completo: <b>${formatMoney(saldoConfirmado(p))}</b>.</div>`;
+  }
+  return `<div class="notice" style="margin-top:10px;">
+    <div style="font-size:15px; margin-bottom:6px;">Si paga el ${fechaStr}, pedile
+      <b>${formatMoney(r.totalAPagarEseDia)}</b> y queda cancelado.</div>
+    <div class="kv"><span class="k">Saldo de hoy</span><span class="v">${formatMoney(saldoConfirmado(p))}</span></div>
+    <div class="kv"><span class="k">Meses de interés cobrados</span><span class="v">${r.mesesCobrados} de ${p.plazo}</span></div>
+    <div class="kv"><span class="k">Rebaja por los meses que no corrieron</span><span class="v">${formatMoney(r.rebajaSugerida)}</span></div>
+    <div class="kv"><span class="k">A cobrar ese día</span><span class="v">${formatMoney(r.totalAPagarEseDia)}</span></div>
+    <div style="margin-top:6px; font-size:12px;">El cálculo vale para esa fecha. La rebaja la
+      confirma el administrador cuando aprueba el abono, así que registrá el monto exacto
+      que te entregó el cliente.</div>
   </div>`;
 }
 
@@ -3900,29 +3960,29 @@ function renderPorAprobar(){
     ${pendientes.length===0? '<div class="empty">No hay abonos pendientes de aprobación. 🎉</div>' : pendientes.map(m=>{
       const p = prestamoById(m.prestamoId);
       const suger = calcCancelacionAnticipada(p, m.fecha);
-      const esCancelacionTemprana = suger.aplica && m.monto >= (saldoConfirmado(p) - suger.rebajaSugerida - 1);
-      const rebajaPrefill = m.rebajaAplicada || (esCancelacionTemprana ? Math.round(suger.rebajaSugerida) : 0);
+      // Se deja en cero a proposito: la rebaja se pone a mano o no se pone.
+      const rebajaPrefill = m.rebajaAplicada || 0;
+      const rCanc = rebajaParaCancelar(p, m.monto, suger);
       return `<div class="mov-item pendiente">
         <div class="mov-top"><span>${p.cliente} · N° ${p.id}</span><span class="pill pill-pendiente">${diasEspera(m)} días esperando</span></div>
         <div class="mov-meta">Monto: ${formatMoney(m.monto)} · ${m.metodo} · Fecha de pago: ${m.fecha} · Registrado por: ${m.registradoPor}</div>
         ${m.nota?`<div class="mov-meta">Nota: ${m.nota}</div>`:''}
         ${m.comprobanteImg?`<img src="${m.comprobanteImg}" class="comprobante-thumb-sm" data-action="ver-imagen" data-src="${m.comprobanteImg}" alt="Comprobante">`:''}
-        ${esCancelacionTemprana ? `<div class="notice">Este abono cancela el préstamo antes del vencimiento: rebaja sugerida ${formatMoney(suger.rebajaSugerida)}.</div>` : ''}
         <div class="grid cols-2" style="margin-top:8px;">
           <div class="field">
             <label>Monto a aprobar</label>
             <input type="text" inputmode="numeric" class="monto-aprobar-input money-input" data-mov="${m.id}" value="${moneyInputValue(m.monto)}">
             <span class="hint">El socio reportó ${formatMoney(m.montoReportado)}. Corrige aquí si contaron o verificaron otro monto — no uses la rebaja para esto.</span>
           </div>
-          ${esCancelacionTemprana ? `<div class="field">
+          ${rCanc.alcanza ? `<div class="field">
             <label>Rebaja a aplicar</label>
             <input type="text" inputmode="numeric" class="rebaja-input money-input" data-mov="${m.id}" value="${moneyInputValue(rebajaPrefill)}">
-            <span class="hint">Solo para descontar intereses por cancelar antes del vencimiento.</span>
+            <span class="hint">Saldo ${formatMoney(rCanc.saldo)}. Para saldarlo con este abono faltan ${formatMoney(rCanc.necesaria)} · tope de la política ${formatMoney(rCanc.tope)}. En cero, el abono entra sin rebaja.</span>
           </div>` : ''}
         </div>
         <div class="ajuste-motivo-wrap" data-mov="${m.id}"></div>
         <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
-          <button class="btn btn-primary btn-sm" data-action="aprobar" data-mov="${m.id}" data-suger="${rebajaPrefill}" data-monto-original="${m.monto}">Aprobar abono</button>
+          <button class="btn btn-primary btn-sm" data-action="aprobar" data-mov="${m.id}" data-suger="${rebajaPrefill}" data-saldo="${rCanc.saldo}" data-monto-original="${m.monto}">Aprobar abono</button>
           <button class="btn btn-danger btn-sm" data-action="abrir-rechazo" data-mov="${m.id}">Rechazar</button>
         </div>
       </div>`;
@@ -3962,13 +4022,13 @@ function renderCierreCaja(){
       ${efectivos.map(m=>{
         const p = prestamoById(m.prestamoId);
         const suger = calcCancelacionAnticipada(p, m.fecha);
-        const cancela = cancelaAnticipado(p, m.monto, suger.rebajaSugerida, suger);
-        const rebajaPrefill = cancela ? Math.round(m.rebajaAplicada || suger.rebajaSugerida) : 0;
+        // Se deja en cero a proposito: la rebaja se pone a mano o no se pone.
+        const rebajaPrefill = Math.round(m.rebajaAplicada || 0);
+        const rCanc = rebajaParaCancelar(p, m.monto, suger);
         return `<div class="mov-item pendiente">
           <div class="mov-top"><span>${p.cliente} · N° ${p.id}</span><span>${formatMoney(m.monto)}</span></div>
           <div class="mov-meta">Socio: ${p.socio} · Fecha de pago: ${m.fecha} · Registrado por: ${m.registradoPor}</div>
           ${m.comprobanteImg?`<img src="${m.comprobanteImg}" class="comprobante-thumb-sm" data-action="ver-imagen" data-src="${m.comprobanteImg}" alt="Comprobante">`:''}
-          ${cancela ? `<div class="notice">Este abono cancela el préstamo antes del vencimiento: rebaja sugerida ${formatMoney(suger.rebajaSugerida)}. Saldo actual ${formatMoney(saldoConfirmado(p))}.</div>` : ''}
           <div class="field" style="margin-top:8px;">
             <label>Monto a confirmar</label>
             <input type="text" inputmode="numeric" class="caja-monto-input money-input"
@@ -3977,10 +4037,10 @@ function renderCierreCaja(){
                    value="${moneyInputValue(m.monto)}">
             <span class="hint">El socio reportó ${formatMoney(m.montoReportado)}.</span>
           </div>
-          ${suger.aplica ? `<div class="field caja-rebaja-wrap" data-mov="${m.id}" style="${cancela?'':'display:none;'}">
+          ${suger.aplica ? `<div class="field caja-rebaja-wrap" data-mov="${m.id}" style="${rCanc.alcanza?'':'display:none;'}">
             <label>Rebaja por pronto pago</label>
             <input type="text" inputmode="numeric" class="caja-rebaja-input money-input" data-mov="${m.id}" value="${moneyInputValue(rebajaPrefill)}">
-            <span class="hint">Solo para descontar intereses por cancelar antes del vencimiento. Si bajás el monto y ya no alcanza para saldar, la rebaja se cae sola.</span>
+            <span class="hint">Saldo ${formatMoney(rCanc.saldo)}. Para saldarlo con este abono faltan ${formatMoney(rCanc.necesaria)} · tope de la política ${formatMoney(rCanc.tope)}. En cero, el abono entra sin rebaja. Si bajás el monto y ya no alcanza para saldar, la rebaja se cae sola.</span>
           </div>
           <div class="caja-rebaja-aviso" data-mov="${m.id}"></div>` : ''}
           <div class="caja-monto-motivo-wrap" data-mov="${m.id}"></div>
@@ -4969,6 +5029,14 @@ document.addEventListener('click', async function(e){
     render(); return;
   }
   if(action==='pdf-corte'){ abrirPdfCorte(t.dataset.id); return; }
+  if(action==='calcular-cancelacion'){
+    const p = prestamoById(t.dataset.prestamo);
+    const caja = document.getElementById('sim-resultado');
+    const inp = document.getElementById('sim-fecha');
+    if(inp) inp.value = '';
+    if(p && caja) caja.innerHTML = resultadoCancelacion(p, SEED.fechaCorte);
+    return;
+  }
   if(action==='marcar-arrastre'){
     await marcarArrastre(t.dataset.prestamo, t.dataset.valor === '1');
     return;
@@ -5094,7 +5162,17 @@ document.addEventListener('click', async function(e){
     const montoInput = document.querySelector(`.monto-aprobar-input[data-mov="${movId}"]`);
     const rebajaInput = document.querySelector(`.rebaja-input[data-mov="${movId}"]`);
     const montoFinal = montoInput ? parseMoneyInputValue(montoInput.value) : undefined;
-    const rebajaFinal = rebajaInput ? parseMoneyInputValue(rebajaInput.value) : 0;
+    const rebajaPedida = rebajaInput ? parseMoneyInputValue(rebajaInput.value) : 0;
+    // Mismo tope duro que en el cierre: la rebaja no puede pasar lo que falta
+    // para saldar el prestamo con el monto que se va a aprobar.
+    const saldoAprob = Number(t.dataset.saldo)||0;
+    const faltaSaldar = Math.max(0, Math.round(saldoAprob - (montoFinal||0)));
+    if(saldoAprob > 0 && rebajaPedida > faltaSaldar){
+      if(rebajaInput) rebajaInput.value = moneyInputValue(faltaSaldar);
+      toast('La rebaja pasaba lo que falta para saldar. Se ajustó al monto justo: revisala y aprobá de nuevo.');
+      return;
+    }
+    const rebajaFinal = rebajaPedida;
     const montoOriginal = Number(t.dataset.montoOriginal)||0;
     const sugerida = Number(t.dataset.suger)||0;
     const cambioMonto = montoFinal !== undefined && montoFinal !== montoOriginal;
@@ -5129,6 +5207,7 @@ document.addEventListener('click', async function(e){
 
     const pendientes = [];
     let faltaMotivo = false;
+    let rebajaTopada = false;
     let huboCero = false;
     checks.forEach(c=>{
       const mov = movPorId(c.dataset.mov);
@@ -5146,8 +5225,17 @@ document.addEventListener('click', async function(e){
       const saldo  = montoInput ? Number(montoInput.dataset.saldo)||0 : 0;
       const rebajaInput = document.querySelector(`.caja-rebaja-input[data-mov="${mov.id}"]`);
       const rebajaPedida = rebajaInput ? parseMoneyInputValue(rebajaInput.value) : 0;
-      const alcanza = aplica && montoFinal >= (saldo - rebajaPedida - 1);
-      const rebajaFinal = alcanza ? rebajaPedida : 0;
+      // Tope duro: la rebaja no puede pasar lo que falta para saldar. Si lo
+      // pasa, el cliente paga de mas y la rebaja infla el cuadre, asi que se
+      // corrige en pantalla y se pide un segundo clic en vez de recortarla
+      // por lo bajo.
+      const rebajaPosible = Math.min(rebajaPedida, Math.max(0, Math.round(saldo - montoFinal)));
+      if(rebajaPedida > rebajaPosible){
+        if(rebajaInput) rebajaInput.value = moneyInputValue(rebajaPosible);
+        rebajaTopada = true; return;
+      }
+      const alcanza = aplica && montoFinal >= (saldo - rebajaPosible - 1);
+      const rebajaFinal = alcanza ? rebajaPosible : 0;
       const rebajaCambio = Math.round(rebajaFinal) !== Math.round(mov.rebajaAplicada || 0);
 
       // Un abono confirmado en cero no es un abono: no entró plata, el saldo
@@ -5168,6 +5256,7 @@ document.addEventListener('click', async function(e){
         pendientes.push({movId: mov.id, montoFinal, rebajaFinal});
       }
     });
+    if(rebajaTopada){ toast('La rebaja pasaba lo que falta para saldar. Se ajustó al monto justo: revisala y confirmá de nuevo.'); return; }
     if(faltaMotivo){ toast('Indica el motivo del ajuste antes de confirmar.'); return; }
     if(huboCero){ toast('Un abono en ₡0 no se confirma. Si el efectivo no llegó, usá "El efectivo no llegó · Rechazar".'); return; }
     const otrosMovs = movsOtrosMetodosPendientesCierre();
@@ -5312,13 +5401,7 @@ document.addEventListener('change', function(e){
     if(!e.target.value){ document.getElementById('sim-resultado').innerHTML=''; return; }
     const [y,m,d] = e.target.value.split('-');
     const fechaStr = `${d}/${m}/${y}`;
-    const r = calcCancelacionAnticipada(p, fechaStr);
-    document.getElementById('sim-resultado').innerHTML = r.aplica ? `
-      <div class="notice">
-        <div class="kv"><span class="k">Meses cobrados</span><span class="v">${r.mesesCobrados} de ${p.plazo}</span></div>
-        <div class="kv"><span class="k">Rebaja sugerida</span><span class="v">${formatMoney(r.rebajaSugerida)}</span></div>
-        <div class="kv"><span class="k">Total a pagar ese día</span><span class="v">${formatMoney(r.totalAPagarEseDia)}</span></div>
-      </div>` : `<div class="notice warn">No aplica rebaja para esta fecha (a menos de ${CONFIG.umbralDias} días del vencimiento, o ya se cobraron todos los meses).</div>`;
+    document.getElementById('sim-resultado').innerHTML = resultadoCancelacion(p, fechaStr);
     return;
   }
   if(e.target.id==='recibos-desde' || e.target.id==='recibos-hasta'){
@@ -5388,35 +5471,30 @@ function actualizarAvisoRebaja(form){
     ? `<div style="margin-top:4px; font-size:12.5px;">Ya hay ${formatMoney(enVuelo)} reportado de este cliente sin confirmar todavía, así que el saldo en firme sería <b>${formatMoney(saldoFlotante)}</b>.</div>`
     : '';
   const suger = calcCancelacionAnticipada(p, fechaStr);
-  const paraCancelar = Math.max(0, saldo - Math.round(suger.rebajaSugerida));
   const nota = sinFecha ? ` <span class="muted">(calculado para ${fechaStr}; cambia si pagó otro día)</span>` : '';
 
-  // Sin rebaja posible: igual conviene decir cuánto queda.
-  if(!suger.aplica){
-    caja.innerHTML = monto > 0
-      ? `<div class="notice">Saldo actual ${formatMoney(saldo)}. Con este abono le quedarían <b>${formatMoney(Math.max(0, saldoFlotante - monto))}</b>.${nota}${avisoFlotante}</div>`
-      : `<div class="notice">Saldo actual de este préstamo: <b>${formatMoney(saldo)}</b>.${nota}${avisoFlotante}</div>`;
-    return;
-  }
+  /* Este aviso solo dice el saldo. NO propone cancelar el préstamo por el
+     tamaño del abono: la cancelación anticipada se pide antes, en el cálculo
+     del préstamo, y con ese número se le cobra al cliente. Antes, cualquier
+     abono que cayera en el rango anunciaba "queda cancelado" y se llevaba la
+     rebaja entera, y el socio se lo prometía al cliente sin que nadie lo
+     hubiera aprobado. */
+  const r = rebajaParaCancelar(p, monto, suger);
 
-  if(cancelaAnticipado(p, monto, suger.rebajaSugerida, suger)){
-    caja.innerHTML = `<div class="notice" style="background:var(--success-bg); color:var(--success);">
-      Con este monto el préstamo queda <b>cancelado</b>.
-      Se le rebajan <b>${formatMoney(suger.rebajaSugerida)}</b> de intereses por pagar antes del vencimiento
-      (saldo ${formatMoney(saldo)} − rebaja = ${formatMoney(paraCancelar)}).${nota}
-      <div style="margin-top:4px; font-size:12px;">La rebaja la confirma el administrador al aprobar el abono.</div>
+  if(r.sobrepago > 0){
+    caja.innerHTML = `<div class="notice warn">
+      Este monto pasa el saldo por <b>${formatMoney(r.sobrepago)}</b>.
+      El saldo es ${formatMoney(saldo)}; revisá el monto antes de enviarlo.${nota}
       ${avisoFlotante}
     </div>`;
     return;
   }
 
-  const falta = paraCancelar - monto;
   caja.innerHTML = `<div class="notice">
-    Este cliente puede <b>cancelar</b> pagando <b>${formatMoney(paraCancelar)}</b>:
-    se le rebajarían ${formatMoney(suger.rebajaSugerida)} de intereses por pagar antes del vencimiento.${nota}
+    Saldo actual <b>${formatMoney(saldo)}</b>.
     ${monto > 0
-      ? `<div style="margin-top:4px;">Con ${formatMoney(monto)} le faltarían ${formatMoney(falta)} para cancelar, y le quedarían <b>${formatMoney(Math.max(0, saldoFlotante - monto))}</b> de saldo sin rebaja.</div>`
-      : ''}
+      ? `Con este abono le quedarían <b>${formatMoney(Math.max(0, saldoFlotante - monto))}</b>.`
+      : ''}${nota}
     ${avisoFlotante}
   </div>`;
 }
@@ -5565,16 +5643,17 @@ document.addEventListener('submit', async function(e){
     if(!monto || monto<=0){ toast('Escribe un monto válido.'); return; }
     const metodo = f.metodo.value;
     const nota = f.nota.value;
-    const p = prestamoById(prestamoId);
-    const suger = calcCancelacionAnticipada(p, fechaStr);
-    // La rebaja por cancelación anticipada solo aplica si este abono realmente salda el préstamo,
-    // no a cualquier abono parcial dentro del plazo.
-    const esCancelacionTemprana = suger.aplica && monto >= (saldoConfirmado(p) - suger.rebajaSugerida - 1);
+    /* El abono se registra SIEMPRE sin rebaja. Antes se le estampaba aqui la
+       rebaja sugerida completa cuando el monto alcanzaba para saldar, y de ahi
+       venia sola hasta el saldo del cliente sin que nadie la aprobara: un
+       abono de 34.000 contra un saldo de 45.000 se llevaba los 15.000 del tope
+       y dejaba al cliente pagando 4.000 de mas. La rebaja la pone el
+       administrador a mano al aprobar o al cerrar caja, y puede no ponerla. */
     const esAdmin = f.dataset.admin==='1';
     const socioObjetivo = f.dataset.socio;
     const comprobanteImg = f.comprobanteImg.value;
     const corrigeA = f.dataset.corrige || null;
-    await registrarAbono({prestamoId, fecha:fechaStr, monto, metodo, nota, rebaja: esCancelacionTemprana?suger.rebajaSugerida:0, porAdmin:esAdmin, socioObjetivo, comprobanteImg, corrigeA});
+    await registrarAbono({prestamoId, fecha:fechaStr, monto, metodo, nota, rebaja: 0, porAdmin:esAdmin, socioObjetivo, comprobanteImg, corrigeA});
     STATE.screenParams = {};
     goto(esAdmin?'aprobar':'cartera');
   }
