@@ -290,6 +290,22 @@ main{padding:16px 0 40px;}
 .globo{position:absolute; top:-4px; right:-10px; background:#c0392b; color:#fff;
   font-size:10px; font-weight:700; line-height:1; padding:2px 5px; border-radius:99px;}
 .bottom-nav .ic{position:relative;}
+/* El globo rojo tambien sobre el boton del menu y sobre cada icono de la
+   franja lateral: hay que ver desde afuera que algo espera adentro. */
+.menu-lat button, .icon-btn{position:relative;}
+.menu-lat .globo{top:2px; right:2px;}
+
+/* La franja de novedades, debajo de la cabecera. Desaparece sola cuando no
+   queda nada esperando, que es la unica forma de que no se vuelva paisaje. */
+.novedades{
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  padding:8px 16px; background:var(--warning-bg); color:var(--warning);
+  border-bottom:1px solid var(--border); font-size:13px; font-weight:700;
+}
+.chip-novedad{
+  border:1px solid currentColor; background:transparent; color:inherit;
+  font:inherit; padding:4px 10px; border-radius:999px; cursor:pointer; white-space:nowrap;
+}
 
 .fila-anulada td{opacity:.55; text-decoration:line-through;}
 .fila-anulada td:first-child, .fila-anulada td:last-child, .fila-anulada td:nth-last-child(2){text-decoration:none; opacity:1;}
@@ -495,7 +511,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '4.5';
+const APP_VERSION = '4.6';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -3380,10 +3396,11 @@ function render(){
   /* El administrador navega por el menu lateral; el socio, con sus pestanas
      arriba en escritorio y la barra de abajo en el telefono. */
   const esAdmin = STATE.role === 'admin';
-  app.innerHTML = renderHeader()
+  app.innerHTML = renderHeader() + renderNovedades()
     + (esAdmin ? renderMenuLateral() : renderTabs())
     + `<main class="container">${renderScreen()}${renderPieLegal()}</main>`
     + (esAdmin ? '' : renderBottomNav()) + renderModal();
+  marcarIconoApp();
 }
 
 /* La marca va FUERA de la tarjeta: la tarjeta es el formulario, no el letrero.
@@ -3506,9 +3523,13 @@ function renderMenuLateral(){
   <nav class="menu-lat no-print${STATE.menu ? ' abierto' : ''}" aria-label="Secciones">
     <button data-action="cerrar-menu" title="Cerrar el menú" aria-label="Cerrar el menú">✕</button>
     <div class="sep"></div>
-    ${ADMIN_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}"
-        data-action="goto" data-screen="${id}" title="${label}" aria-label="${label}"
-        ${STATE.screen===id?'aria-current="page"':''}>${iconos[id]}</button>`).join('')}
+    ${ADMIN_TABS.map(([id,label])=>{
+      const g = globoDe(id);
+      return `<button class="${STATE.screen===id?'active':''}"
+        data-action="goto" data-screen="${id}"
+        title="${label}${g?' · '+g+' por atender':''}" aria-label="${label}${g?', '+g+' por atender':''}"
+        ${STATE.screen===id?'aria-current="page"':''}>${iconos[id]}${pintaGlobo(id)}</button>`;
+    }).join('')}
   </nav>`;
 }
 
@@ -3523,8 +3544,11 @@ function renderHeader(){
       <span class="badge-corte">Datos al ${SEED.fechaCorte}</span>
 
       <div class="fila-perfil">
-        ${STATE.role==='admin' ? `<button class="icon-btn no-print" data-action="toggle-menu"
-          title="Secciones" aria-label="Abrir el menú de secciones" aria-expanded="${STATE.menu}">☰</button>` : ''}
+        ${STATE.role==='admin' ? (()=>{ const t = novedades().total;
+        return `<button class="icon-btn no-print" data-action="toggle-menu"
+          title="Secciones${t?' · '+t+' por atender':''}"
+          aria-label="Abrir el menú de secciones${t?', '+t+' por atender':''}"
+          aria-expanded="${STATE.menu}">☰${t?`<span class="globo">${t>99?'99+':t}</span>`:''}</button>`; })() : ''}
         <div class="role-controls">
           <span class="pill pill-vigente">${roleLabel}</span>
           <button class="icon-btn" data-action="toggle-theme" title="Cambiar modo claro/oscuro">${document.documentElement.getAttribute('data-theme')==='dark' ? '☀️' : '🌙'}</button>
@@ -4173,6 +4197,94 @@ function corteDebido(hoy){
   const fin = ultimoDiaDelMes(anio, mes);
   return {anio, mes, fin, etiqueta: NOMBRE_MES[mes-1] + ' ' + anio,
           pendientes: abonosPorAplicarHasta(fin)};
+}
+
+/* ---------- Novedades ----------
+   Lo que espera a quien esta mirando. Al administrador le esperan las
+   solicitudes, los abonos por aprobar y el efectivo por confirmar en caja;
+   al socio, los mensajes sin leer.
+
+   La mora no cuenta como novedad: no la genero nadie, la genero el
+   calendario. Se muestra como globo en su icono, pero no suma al total que
+   sale en la franja ni en el icono de la aplicacion. */
+function novedades(){
+  if(STATE.role === 'admin'){
+    const abonos = MOVS.filter(m => m.tipo === 'abono' && !m.historico);
+    const porAprobar  = abonos.filter(m => m.estado === 'pendiente').length;
+    const enCaja      = abonos.filter(m => m.estado === 'reportado_pendiente_caja').length;
+    const solicitudes = SOLICITUDES.filter(s => s.estado === 'pendiente').length;
+    let mora = 0;
+    try{ mora = prestamosConMoraPendiente().length; }catch(e){ mora = 0; }
+    return {porAprobar, enCaja, solicitudes, mora, sinLeer: 0,
+            total: porAprobar + enCaja + solicitudes};
+  }
+  const sl = sinLeer();
+  return {porAprobar:0, enCaja:0, solicitudes:0, mora:0, sinLeer: sl, total: sl};
+}
+function globoDe(pantalla){
+  const n = novedades();
+  return ({aprobar:n.porAprobar, cierreCaja:n.enCaja, solicitudes:n.solicitudes,
+           vencidos:n.mora, bandeja:n.sinLeer})[pantalla] || 0;
+}
+function pintaGlobo(pantalla){
+  const c = globoDe(pantalla);
+  return c ? `<span class="globo">${c > 99 ? '99+' : c}</span>` : '';
+}
+
+/* La franja de arriba. Cada cosa es un boton que lleva a atenderla. */
+function renderNovedades(){
+  const n = novedades();
+  if(STATE.role !== 'admin' || !n.total) return '';
+  const chip = (cuantos, uno, varios, pantalla) => cuantos
+    ? `<button class="chip-novedad" data-action="goto" data-screen="${pantalla}">${cuantos} ${cuantos === 1 ? uno : varios}</button>`
+    : '';
+  return `<div class="novedades no-print">
+    <span>Te esperan ${n.total}:</span>
+    ${chip(n.solicitudes, 'solicitud de préstamo', 'solicitudes de préstamo', 'solicitudes')}
+    ${chip(n.porAprobar, 'abono por aprobar', 'abonos por aprobar', 'aprobar')}
+    ${chip(n.enCaja, 'recibo de efectivo', 'recibos de efectivo', 'cierreCaja')}
+  </div>`;
+}
+
+/* El numerito sobre el icono de la aplicacion en la pantalla de inicio, y en
+   el titulo de la pestana. En un telefono con la app instalada esto es lo
+   mas parecido a una notificacion de verdad sin montar un servidor. */
+function marcarIconoApp(){
+  const t = novedades().total;
+  try{
+    if(navigator.setAppBadge){ t ? navigator.setAppBadge(t) : navigator.clearAppBadge(); }
+  }catch(e){ /* el navegador no lo soporta: no pasa nada */ }
+  document.title = t ? `(${t}) Lazos` : 'Lazos';
+}
+
+/* Cada minuto se vuelven a leer los datos para enterarse de lo que hizo un
+   socio desde otro telefono. No se redibuja si hay algo escrito en pantalla:
+   redibujar borra lo que la persona estaba llenando. */
+let _vigilante = null;
+function arrancarVigilancia(){
+  detenerVigilancia();
+  _vigilante = setInterval(async () => {
+    if(document.hidden || !STATE.role || STATE.modal) return;
+    const antes = novedades().total;
+    try{
+      await cargarTodo();
+      await cargarMensajes();
+    }catch(e){ return; }
+    const ahora = novedades().total;
+    marcarIconoApp();
+    if(ahora > antes){
+      const cuantas = ahora - antes;
+      toast(cuantas === 1 ? 'Llegó algo nuevo por revisar.' : `Llegaron ${cuantas} cosas nuevas por revisar.`);
+    }
+    if(!hayAlgoEscrito()) render();
+  }, 60000);
+}
+function detenerVigilancia(){ if(_vigilante){ clearInterval(_vigilante); _vigilante = null; } }
+function hayAlgoEscrito(){
+  const a = document.activeElement;
+  if(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return true;
+  return [...document.querySelectorAll('form input, form textarea')]
+    .some(e => e.type !== 'hidden' && String(e.value || '').trim() !== '');
 }
 
 function renderTablero(){
@@ -5310,6 +5422,7 @@ document.addEventListener('click', async function(e){
   const action = t.dataset.action;
 
   if(action==='salir'){
+    detenerVigilancia();
     sb.auth.signOut().then(()=>{
       STATE.role=null; STATE.socioActivo=null; STATE.sesion=null;
       // Sin esto, lo que cargó el administrador se queda en memoria cuando
@@ -6206,6 +6319,7 @@ async function entrar(sesion){
   STATE.screen = STATE.role === 'admin' ? 'tablero' : 'cartera';
   STATE.screenParams = {};
   render();
+  arrancarVigilancia();
 }
 
 (async function arrancar(){
