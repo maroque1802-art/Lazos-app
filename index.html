@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '4.0';
+const APP_VERSION = '4.1';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -4023,11 +4023,86 @@ function inputDateToDmy(iso){
 }
 
 /* ---------- ADMIN: Tablero ---------- */
+/* ---------- La regla del corte automatico ----------
+   El corte sale el ultimo dia del mes a las 23:55, pero solo si no quedan
+   recibos por aplicar. Un abono en efectivo espera el cierre de caja y uno
+   por Sinpe o transferencia espera la aprobacion: mientras alguno de los dos
+   este colgando, las cifras del mes todavia se pueden mover, y un corte sale
+   con numeros que van a cambiar al dia siguiente. Si hay pendientes no se
+   manda y se vuelve a intentar la noche siguiente, hasta que la bandeja de
+   aprobaciones quede limpia.
+
+   Solo cuentan los pendientes con fecha de pago DENTRO del periodo que se
+   cierra. Un abono nuevo del 2 de octubre no tiene nada que ver con el corte
+   de setiembre, y si contara, en los dias de reintento casi siempre habria
+   algo pendiente y el corte no saldria nunca. */
+function abonosPorAplicarHasta(hasta){
+  return MOVS.filter(m => m.tipo === 'abono' && !m.historico
+                       && (m.estado === 'pendiente' || m.estado === 'reportado_pendiente_caja')
+                       && parseDMY(m.fecha) <= hasta);
+}
+function ultimoDiaDelMes(anio, mes){ return new Date(anio, mes, 0); }
+function corteYaEnviado(anio, mes){
+  const hasta = formatDMY(ultimoDiaDelMes(anio, mes));
+  return MENSAJES.some(m => m.tipo === 'corte_mensual' && m.periodoFin === hasta);
+}
+/* El periodo que toca cerrar: el mes que acaba de terminar, y nada mas.
+   El ultimo dia del mes ese mes ya cerro y es el candidato; los dias
+   siguientes sigue siendo el candidato, que es el reintento.
+
+   A proposito no se buscan meses viejos sin corte. En un sistema que arranca
+   sin ningun corte enviado, buscar hacia atras proponia cerrar el mes de hace
+   un ano. Si alguna vez un mes se queda sin corte, sale a mano desde Mensajes:
+   durante todo el mes siguiente el tablero lo estuvo pidiendo, asi que no se
+   pasa en silencio. */
+function corteDebido(hoy){
+  const ref = hoy || todayCutoff();
+  const finDeEste = ultimoDiaDelMes(ref.getFullYear(), ref.getMonth() + 1);
+  // Si hoy es el ultimo dia, el candidato es este mes; si no, el anterior.
+  const d = formatDMY(finDeEste) === formatDMY(ref)
+    ? new Date(ref.getFullYear(), ref.getMonth(), 1)
+    : new Date(ref.getFullYear(), ref.getMonth() - 1, 1);
+  const anio = d.getFullYear(), mes = d.getMonth() + 1;
+  if(corteYaEnviado(anio, mes)) return null;
+  const fin = ultimoDiaDelMes(anio, mes);
+  return {anio, mes, fin, etiqueta: NOMBRE_MES[mes-1] + ' ' + anio,
+          pendientes: abonosPorAplicarHasta(fin)};
+}
+
 function renderTablero(){
   const r = calcResumen();
   const saldos = saldosDisponibles();
   const porSocio = resumenPorSocio();
   return `
+  ${(() => {
+    const deb = corteDebido();
+    if(!deb) return '';
+    if(deb.pendientes.length){
+      const enCaja = deb.pendientes.filter(m => m.estado === 'reportado_pendiente_caja').length;
+      const porAprobar = deb.pendientes.length - enCaja;
+      const desglose = [
+        enCaja     ? enCaja + ' en efectivo, por confirmar en el cierre de caja' : '',
+        porAprobar ? porAprobar + ' por Sinpe o transferencia, por aprobar' : ''
+      ].filter(Boolean).join(' · ');
+      return `<div class="notice warn">
+        <b>Falta aplicar recibos para cerrar ${deb.etiqueta}.</b>
+        Quedan ${deb.pendientes.length} abono(s) con fecha de ese periodo sin aplicar: ${desglose}.
+        El corte no se envía mientras cuelguen: se vuelve a intentar esta noche a las 11:55.
+        <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;" class="no-print">
+          ${porAprobar ? '<button class="btn btn-primary btn-sm" data-action="goto" data-screen="aprobar">Ir a aprobar</button>' : ''}
+          ${enCaja ? '<button class="btn btn-primary btn-sm" data-action="goto" data-screen="cierreCaja">Ir al cierre de caja</button>' : ''}
+        </div>
+      </div>`;
+    }
+    return `<div class="notice">
+      <b>El corte de ${deb.etiqueta} está listo para salir.</b>
+      No quedan recibos por aplicar de ese periodo, así que se envía solo esta noche
+      a las 11:55. Si lo querés mandar ya, entrá a Mensajes.
+      <div style="margin-top:8px;" class="no-print">
+        <button class="btn btn-ghost btn-sm" data-action="goto" data-screen="mensajes">Ir a Mensajes</button>
+      </div>
+    </div>`;
+  })()}
   <div class="card">
     <h2>Tablero</h2>
     <p class="muted">Resumen general de la cartera al ${SEED.fechaCorte}.</p>
