@@ -460,7 +460,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '4.1';
+const APP_VERSION = '4.2';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -1662,10 +1662,11 @@ function construirPdfRecibo(r, reimpresion){
   // La rebaja explica por qué el saldo bajó más que el pago. Sin esta línea
   // el cliente no puede cuadrar su cuenta.
   if(r.rebaja > 0) lineas.push(['Rebaja por pronto pago', pdfMoney(r.rebaja)]);
+  const lv = lineaVencimientoRecibo(r, true);
   lineas.push(
     ['Saldo anterior', pdfMoney(r.saldoAnterior)],
     ['Saldo nuevo', pdfMoney(r.saldoNuevo)],
-    ['Proxima fecha de vencimiento', r.proximoVencimiento]
+    [lv.k, lv.v]
   );
   lineas.forEach(([k,v])=>{ c.fila(k, v); c.bajar(18); });
 
@@ -3646,6 +3647,28 @@ function renderMovItem(m, esAdmin){
    El socio pide el calculo, ve el monto exacto y con ese numero le pide el
    pago al cliente. Un abono grande por si solo no cancela nada: la rebaja la
    aplica el administrador cuando aprueba el abono. */
+/* La linea del vencimiento en el recibo.
+   Decia siempre "Proxima fecha de vencimiento", aunque esa fecha ya hubiera
+   pasado: un recibo del 29 de setiembre anunciaba como "proxima" una fecha
+   del 6. Y en un prestamo que queda cancelado no hay proximo vencimiento que
+   anunciar. El PDF va sin tildes, como el resto de sus etiquetas. */
+function lineaVencimientoRecibo(r, paraPdf){
+  const tilde = (con, sin) => paraPdf ? sin : con;
+  if(Math.round(r.saldoNuevo) <= 0){
+    return {k: tilde('Estado del préstamo', 'Estado del prestamo'),
+            v: tilde('Cancelado · sin saldo pendiente', 'Cancelado - sin saldo pendiente')};
+  }
+  const venc  = parseDMY(r.proximoVencimiento);
+  const fecha = parseDMY(r.fecha);
+  const normal = {k: tilde('Próxima fecha de vencimiento', 'Proxima fecha de vencimiento'),
+                  v: r.proximoVencimiento};
+  if(!venc || isNaN(venc) || !fecha || isNaN(fecha)) return normal;
+  const dias = daysBetween(venc, fecha);
+  if(dias <= 0) return normal;
+  return {k: tilde('Venció el', 'Vencio el'),
+          v: `${r.proximoVencimiento}${tilde(' · ', ' - ')}${dias} ${dias === 1 ? 'día' : 'días'} de atraso`};
+}
+
 function renderSimuladorCancelacion(p){
   return `<div class="card no-print">
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
@@ -5157,7 +5180,8 @@ function renderReciboModal(r){
           <tr><td class="k">Método</td><td class="v">${r.metodo}</td></tr>
           <tr><td class="k">Saldo anterior</td><td class="v">${formatMoney(r.saldoAnterior)}</td></tr>
           <tr><td class="k">Saldo nuevo</td><td class="v">${formatMoney(r.saldoNuevo)}</td></tr>
-          <tr><td class="k">Próxima fecha de vencimiento</td><td class="v">${r.proximoVencimiento}</td></tr>
+          ${(()=>{ const lv = lineaVencimientoRecibo(r, false);
+            return `<tr><td class="k">${lv.k}</td><td class="v">${lv.v}</td></tr>`; })()}
         </table>
       </div>
       </div>
