@@ -110,6 +110,12 @@ header.topbar{
 @media (max-width:560px){ .tagline{display:none;} }
 .spacer{flex:1;}
 .role-controls{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+/* La segunda fila de la cabecera: el menu a la izquierda y el perfil a la
+   derecha, justo debajo de la fecha. Va agrupada y no suelta, porque suelta
+   el avatar se caia a una tercera linea por su cuenta. En pantalla ancha
+   cabe todo seguido en una sola fila. */
+.fila-perfil{display:flex; align-items:center; gap:8px; flex:1 1 auto; min-width:0;}
+@media (max-width:899px){ .fila-perfil{flex-basis:100%;} }
 /* Por tipo se olvidaban email, password y tel: quedaban con el estilo del
    navegador, blancos sobre la tarjeta oscura. Mejor al revés: todo input
    menos los que no son cajas de texto. */
@@ -489,7 +495,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '4.4';
+const APP_VERSION = '4.5';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -3512,17 +3518,21 @@ function renderHeader(){
   return `
   <header class="topbar">
     <div class="topbar-inner">
-      ${STATE.role==='admin' ? `<button class="icon-btn no-print" data-action="toggle-menu"
-        title="Secciones" aria-label="Abrir el menú de secciones" aria-expanded="${STATE.menu}">☰</button>` : ''}
       <div class="logo">${svgLogo(34)}<div class="tagline">Tu punto de apoyo para seguir adelante</div></div>
       <div class="spacer"></div>
       <span class="badge-corte">Datos al ${SEED.fechaCorte}</span>
-      <div class="role-controls">
+
+      <div class="fila-perfil">
+        ${STATE.role==='admin' ? `<button class="icon-btn no-print" data-action="toggle-menu"
+          title="Secciones" aria-label="Abrir el menú de secciones" aria-expanded="${STATE.menu}">☰</button>` : ''}
+        <div class="role-controls">
+          <span class="pill pill-vigente">${roleLabel}</span>
+          <button class="icon-btn" data-action="toggle-theme" title="Cambiar modo claro/oscuro">${document.documentElement.getAttribute('data-theme')==='dark' ? '☀️' : '🌙'}</button>
+          <button class="btn btn-ghost btn-sm" data-action="salir">Salir</button>
+        </div>
+        <div class="spacer"></div>
         <span class="avatar${yo.esBot?' bot':''}" title="${escapaHtml(yo.titulo)}"
               aria-label="${escapaHtml(yo.titulo)}">${yo.iniciales}</span>
-        <span class="pill pill-vigente">${roleLabel}</span>
-        <button class="icon-btn" data-action="toggle-theme" title="Cambiar modo claro/oscuro">${document.documentElement.getAttribute('data-theme')==='dark' ? '☀️' : '🌙'}</button>
-        <button class="btn btn-ghost btn-sm" data-action="salir">Salir</button>
       </div>
     </div>
   </header>`;
