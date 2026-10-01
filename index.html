@@ -511,7 +511,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '4.6';
+const APP_VERSION = '4.7';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -4285,6 +4285,20 @@ function hayAlgoEscrito(){
   if(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return true;
   return [...document.querySelectorAll('form input, form textarea')]
     .some(e => e.type !== 'hidden' && String(e.value || '').trim() !== '');
+}
+
+/* ¿Se puede cerrar ya el periodo que toca?
+   El corte sale la NOCHE del ultimo dia, no a las cero horas de ese dia.
+   GitHub puede atrasar una tarea programada unos minutos, y el 30/09/2026 ese
+   atraso cruzo la medianoche: el robot desperto a las 00:00 del dia 30, vio
+   que era el ultimo dia de setiembre y lo cerro con 24 horas por delante.
+   Cuando el mes ya termino de verdad, la hora da igual. */
+function corteListoParaEnviar(deb, ahora){
+  if(!deb) return false;
+  const ref = ahora || new Date();
+  const hoy = `${String(ref.getDate()).padStart(2,'0')}/${String(ref.getMonth()+1).padStart(2,'0')}/${ref.getFullYear()}`;
+  if(formatDMY(deb.fin) !== hoy) return true;   // el mes ya termino: adelante
+  return ref.getHours() >= 22;                  // es el ultimo dia: solo de noche
 }
 
 function renderTablero(){
