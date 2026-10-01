@@ -511,7 +511,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '4.7';
+const APP_VERSION = '4.8';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -3486,6 +3486,7 @@ function renderRegistro(){
 function renderPieLegal(){
   return `<footer class="pie-legal no-print">
     <div><button class="btn btn-ghost btn-sm" data-action="pdf-guia">Descargar la guía rápida (PDF)</button></div>
+    ${renderAvisoIcono()}
     <div>Lazos · Sistema de control de cartera</div>
     <div>© ${new Date().getFullYear()} Lazos. Uso interno. Todos los derechos reservados.</div>
     <div class="pie-version">Versión ${APP_VERSION}</div>
@@ -4247,14 +4248,83 @@ function renderNovedades(){
 }
 
 /* El numerito sobre el icono de la aplicacion en la pantalla de inicio, y en
-   el titulo de la pestana. En un telefono con la app instalada esto es lo
-   mas parecido a una notificacion de verdad sin montar un servidor. */
+   el titulo de la pestana.
+
+   En iPhone esto NO sale solo: hace falta que la app este instalada en la
+   pantalla de inicio Y que se haya concedido el permiso de avisos. Sin el
+   permiso, setAppBadge no hace nada y no avisa de nada, asi que el error se
+   guarda para poder decirlo en pantalla en vez de tragarselo. */
+const AVISOS = {error: ''};
 function marcarIconoApp(){
   const t = novedades().total;
   try{
-    if(navigator.setAppBadge){ t ? navigator.setAppBadge(t) : navigator.clearAppBadge(); }
-  }catch(e){ /* el navegador no lo soporta: no pasa nada */ }
+    if(navigator.setAppBadge){
+      const p = t ? navigator.setAppBadge(t) : navigator.clearAppBadge();
+      if(p && p.catch) p.catch(e => { AVISOS.error = String((e && e.message) || e); });
+    }
+  }catch(e){ AVISOS.error = String((e && e.message) || e); }
   document.title = t ? `(${t}) Lazos` : 'Lazos';
+}
+function estadoAvisos(){
+  let instalada = false;
+  try{
+    instalada = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+             || navigator.standalone === true;
+  }catch(e){}
+  return {
+    soporta: typeof navigator !== 'undefined' && 'setAppBadge' in navigator,
+    permiso: (typeof Notification !== 'undefined') ? Notification.permission : 'sin-soporte',
+    instalada,
+    error: AVISOS.error
+  };
+}
+async function pedirPermisoAvisos(){
+  if(typeof Notification === 'undefined'){
+    toast('Este navegador no permite avisos. En iPhone hay que abrir la app desde el ícono, no desde Safari.');
+    return;
+  }
+  try{
+    const r = await Notification.requestPermission();
+    if(r === 'granted'){
+      AVISOS.error = '';
+      marcarIconoApp();
+      toast('Listo. El numerito va a salir sobre el ícono de Lazos.');
+    } else if(r === 'denied'){
+      toast('Quedó bloqueado. Se vuelve a permitir desde los ajustes del teléfono.');
+    } else {
+      toast('No se concedió el permiso.');
+    }
+  }catch(e){
+    toast('No se pudo pedir el permiso: ' + ((e && e.message) || e));
+  }
+  render();
+}
+
+/* Lo que se muestra en el pie sobre el numerito del icono. Solo aparece
+   cuando hay algo que hacer o algo que explicar. */
+function renderAvisoIcono(){
+  const e = estadoAvisos();
+  if(!e.soporta) return '';
+  if(e.permiso === 'granted' && !e.error) return '';
+  if(e.permiso === 'default'){
+    return `<div style="margin-top:6px;">
+      <button class="btn btn-ghost btn-sm" data-action="permiso-avisos">Activar el número sobre el ícono</button>
+    </div>`;
+  }
+  if(e.permiso === 'denied'){
+    return `<div class="muted" style="margin-top:6px; font-size:12px;">
+      El número sobre el ícono está bloqueado. Se vuelve a permitir en los ajustes del teléfono,
+      en las notificaciones de Lazos.
+    </div>`;
+  }
+  if(!e.instalada){
+    return `<div class="muted" style="margin-top:6px; font-size:12px;">
+      Para ver el número sobre el ícono, abrí Lazos desde la pantalla de inicio, no desde el navegador.
+    </div>`;
+  }
+  return e.error
+    ? `<div class="muted" style="margin-top:6px; font-size:12px;">No se pudo poner el número en el ícono: ${escapaHtml(e.error)}</div>`
+    : '';
 }
 
 /* Cada minuto se vuelven a leer los datos para enterarse de lo que hizo un
@@ -5454,6 +5524,7 @@ document.addEventListener('click', async function(e){
   }
   if(action==='filtro-estado'){ STATE.filtroEstado = t.dataset.val; render(); return; }
   if(action==='tabla-tab'){ STATE.screenParams = {tabla:t.dataset.val}; render(); return; }
+  if(action==='permiso-avisos'){ await pedirPermisoAvisos(); return; }
   if(action==='toggle-menu'){ STATE.menu = !STATE.menu; render(); return; }
   if(action==='cerrar-menu'){ STATE.menu = false; render(); return; }
   if(action==='toggle-theme'){
