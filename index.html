@@ -511,7 +511,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '4.9';
+const APP_VERSION = '5.0';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -1655,6 +1655,9 @@ function pdfLienzo(pageW, pageH, margen){
       return alto;
     },
     nuevaPagina(){ paginas.push([]); actual++; api.y = yInicial; },
+    /* Cuantas hojas llevaria el documento. Sirve para decidir si el papel
+       alcanza antes de armar el archivo. */
+    hojas(){ return paginas.filter(p => p.length).length || 1; },
     /* Reserva espacio: si el bloque no cabe en lo que queda, pasa a otra hoja. */
     asegurarEspacio(alto){ if(api.y - alto < yPie) api.nuevaPagina(); },
     bajar(n){
@@ -1674,8 +1677,14 @@ function pdfLienzo(pageW, pageH, margen){
       api.texto(der, 7, 'F1', x2);
     },
     build(){
-      const total = paginas.length;
-      return ensamblarPdf(pageW, pageH, paginas.map((p, i) =>
+      /* Una hoja sin nada dibujado no se imprime. Pasaba al final: el ultimo
+         bajar() se salia de la franja del pie, se abria hoja nueva y ya no
+         quedaba nada que poner en ella, asi que salia un papel con solo el
+         marco y el pie. */
+      const vivas = paginas.filter(p => p.length);
+      const hojas = vivas.length ? vivas : [[]];
+      const total = hojas.length;
+      return ensamblarPdf(pageW, pageH, hojas.map((p, i) =>
         marco.concat(p, pdfOpsPie(pageW, margen, i+1, total)).join('\n')));
     }
   };
@@ -1696,12 +1705,28 @@ function pdfEnvolver(texto, anchoMax, size){
   return lineas;
 }
 
+/* Un comprobante es de una sola hoja: un recibo de pago partido en dos no
+   tiene sentido. Si el contenido no cabe -un nombre largo, un valor que se
+   fue a su propio renglon, un motivo de anulacion extenso- se alarga el
+   papel y se vuelve a dibujar, en vez de pasar a otra hoja. */
+function unaSolaHoja(dibujar, altoBase){
+  let alto = altoBase;
+  for(let i = 0; i < 12; i++){
+    const c = dibujar(alto);
+    if(c.hojas() === 1) return c.build();
+    alto += 90;
+  }
+  return dibujar(alto).build();
+}
+
 function construirPdfRecibo(r, reimpresion){
   // Un recibo anulado lleva encima el motivo y la nota que lo anuló, así que
-  // necesita más papel: con el alto normal las notas del pie se iban a una
-  // segunda hoja, y un comprobante de pago de dos páginas no tiene sentido.
+  // arranca con más papel.
+  return unaSolaHoja(alto => dibujarRecibo(r, reimpresion, alto),
+                     r.anulado ? 560 : 460);
+}
+function dibujarRecibo(r, reimpresion, pageH){
   const pageW = 300, margen = 30;
-  const pageH = r.anulado ? 560 : 460;
   const c = pdfLienzo(pageW, pageH, margen);
   c.logo(26); c.bajar(40);
   if(reimpresion){ c.texto('REIMPRESION', 10, 'F2', margen); c.bajar(14); }
@@ -1759,13 +1784,16 @@ function construirPdfRecibo(r, reimpresion){
     c.bajar(9);
     c.texto('no emitido en la fecha del pago.', 7, 'F1', margen);
   }
-  return c.build();
+  return c;
 }
 
 /* Nota de reversion: el documento que justifica haber deshecho un abono ya
    aprobado. Lleva su propio consecutivo para poder archivarla y citarla. */
 function construirPdfReversa(rev, original, recibo){
-  const pageW = 300, pageH = 460, margen = 30;
+  return unaSolaHoja(alto => dibujarReversa(rev, original, recibo, alto), 460);
+}
+function dibujarReversa(rev, original, recibo, pageH){
+  const pageW = 300, margen = 30;
   const c = pdfLienzo(pageW, pageH, margen);
   c.logo(26); c.bajar(40);
   c.ops.push('0.72 0.11 0.11 rg');
@@ -1795,7 +1823,7 @@ function construirPdfReversa(rev, original, recibo){
   c.bajar(26);
   c.texto('Este documento deja sin efecto el abono descrito', 7, 'F1', margen); c.bajar(9);
   c.texto('y anula el recibo indicado.', 7, 'F1', margen);
-  return c.build();
+  return c;
 }
 
 function nombreClientePorPrestamo(prestamoId){
