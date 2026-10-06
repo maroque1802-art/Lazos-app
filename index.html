@@ -511,7 +511,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '4.8';
+const APP_VERSION = '4.9';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -1619,10 +1619,31 @@ function pdfLienzo(pageW, pageH, margen){
       const x = Math.max(margen, xDerecho - pdfAnchoTexto(String(str), size));
       api.texto(str, size, font, x);
     },
+    /* Un rotulo a la izquierda y su valor a la derecha, en el mismo renglon.
+       Cuando los dos no caben juntos el valor baja a su propio renglon en vez
+       de montarse encima del rotulo: pasaba en el recibo de un prestamo ya
+       saldado, donde el valor es "Cancelado - sin saldo pendiente".
+       Devuelve el alto extra que consumio, por si quien llama lo necesita. */
     fila(k, v, size){
       size = size || 10;
+      const valor = String(v);
+      const ancho = pageW - margen * 2;
+      // Los 12 puntos son el aire minimo entre el rotulo y su valor.
+      const juntos = pdfAnchoTexto(k, size) + pdfAnchoTexto(valor, size) + 12 <= ancho;
+      const salto = Math.round(size + 3);
+      const lineas = juntos ? [] : pdfEnvolver(valor, ancho, size);
+      // El rotulo y su valor no se separan en dos hojas.
+      if(lineas.length) api.asegurarEspacio(lineas.length * salto);
       api.texto(k, size, 'F1', margen);
-      api.textoDerecha(String(v), size, 'F2', pageW - margen);
+      if(juntos){
+        api.textoDerecha(valor, size, 'F2', pageW - margen);
+        return 0;
+      }
+      lineas.forEach(l => {
+        api.bajar(salto);
+        api.textoDerecha(l, size, 'F2', pageW - margen);
+      });
+      return lineas.length * salto;
     },
     linea(){ api.ops.push(`${margen} ${api.y.toFixed(1)} m ${pageW-margen} ${api.y.toFixed(1)} l S`); },
     /* Dibuja el logo con la esquina superior izquierda donde va el cursor.
