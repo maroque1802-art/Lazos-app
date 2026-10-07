@@ -511,7 +511,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '5.0';
+const APP_VERSION = '5.1';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -4101,7 +4101,7 @@ function renderSolicitarPrestamo(esAdmin){
       <div class="mov-item ${s.estado==='pendiente'?'pendiente':s.estado==='rechazada'?'rechazado':'aprobado'}">
         <div class="mov-top"><span>${s.cliente} · ${formatMoney(s.monto)} a ${s.plazo} meses</span><span class="pill ${pillSol[s.estado]}">${labelSol[s.estado]}</span></div>
         <div class="mov-meta">Solicitado el ${s.fechaSolicitud} · Interés propuesto: ${formatMoney(s.interesPropuesto)}</div>
-        ${s.estado==='pendiente' && colaInfo[s.id] ? `<div class="mov-meta">Solicitud N° ${colaInfo[s.id].numero} en la fila de desembolso${colaInfo[s.id].fondeable ? ' · hay fondos disponibles' : ` · en espera, faltan ${formatMoney(colaInfo[s.id].faltante)} en caja`}</div>` : ''}
+        ${s.estado==='pendiente' && colaInfo[s.id] ? `<div class="mov-meta">Solicitud N° ${colaInfo[s.id].numero} en la fila de desembolso${colaInfo[s.id].enOrden ? ' · hay fondos disponibles' : colaInfo[s.id].alcanzaSolo ? ' · hay fondos, pero van otras antes' : ` · en espera, faltan ${formatMoney(colaInfo[s.id].faltante)} en ${colaInfo[s.id].bolsa==='efectivo'?'caja':'bancos'}`}</div>` : ''}
         <div class="mov-meta">${s.metodoDesembolso}${formatDetalleMetodo(s.metodoDesembolso, s.detalleMetodo) ? ' · '+formatDetalleMetodo(s.metodoDesembolso, s.detalleMetodo) : ''}</div>
         ${s.estado==='aprobada' ? `<div class="mov-meta">Se creó el préstamo N° ${s.prestamoIdAsignado}.</div>` : ''}
         ${s.estado==='rechazada' ? `<div class="mov-meta" style="color:var(--danger)">Motivo: ${s.motivoRechazo}</div>` : ''}
@@ -4117,21 +4117,29 @@ function calcColaSolicitudes(){
   // Cada bolsa se consume por aparte: lo que se desembolsa por banco no baja la caja.
   const restante = {efectivo: saldos.efectivo, bancos: saldos.bancos};
   const colaInfo = {};
+  /* Dos preguntas distintas, y por un tiempo las confundimos en una sola:
+     1. ¿Alcanza la plata que hay AHORA para esta solicitud? (alcanzaSolo)
+     2. ¿Alcanzaría también si se respeta el orden de llegada? (enOrden)
+     La fila es un consejo, no un candado: el administrador puede adelantar
+     la segunda y dejar la primera esperando. Antes el botón de aprobar se
+     deshabilitaba con la pregunta 2 y no había forma de hacerlo. */
   pendientes.forEach((s,idx)=>{
     const bolsa = esMetodoEfectivo(s.metodoDesembolso) ? 'efectivo' : 'bancos';
-    const alcanza = s.monto <= restante[bolsa];
-    const faltante = Math.max(0, s.monto - restante[bolsa]);
+    const alcanzaSolo = s.monto <= saldos[bolsa];
+    const enOrden = s.monto <= restante[bolsa];
     // La otra bolsa puede cubrirlo si se cambia el método de desembolso.
     const otraBolsa = bolsa==='efectivo' ? 'bancos' : 'efectivo';
     colaInfo[s.id] = {
       numero: idx+1,
       bolsa,
-      fondeable: alcanza,
-      faltante,
-      alternativaPosible: !alcanza && s.monto <= restante[otraBolsa],
+      alcanzaSolo,
+      enOrden,
+      antes: idx,
+      faltante: Math.max(0, s.monto - saldos[bolsa]),
+      alternativaPosible: !alcanzaSolo && s.monto <= saldos[otraBolsa],
       alternativa: otraBolsa==='efectivo' ? 'efectivo' : 'transferencia o Sinpe'
     };
-    if(alcanza) restante[bolsa] -= s.monto;
+    if(enOrden) restante[bolsa] -= s.monto;
   });
   return {pendientes, disponible: saldos.total, saldos, colaInfo};
 }
@@ -4145,14 +4153,15 @@ function renderSolicitudesAdmin(){
     <div class="kv"><span class="k">Disponible en efectivo (caja)</span><span class="v">${formatMoney(saldos.efectivo)}</span></div>
     <div class="kv"><span class="k">Disponible en bancos (transferencia / Sinpe)</span><span class="v">${formatMoney(saldos.bancos)}</span></div>
     <div class="kv"><span class="k"><b>Disponible total</b></span><span class="v">${formatMoney(saldos.total)}</span></div>
-    <p class="muted" style="font-size:12px;">Cada solicitud se mide contra la bolsa de su método de desembolso. Si no alcanza en una pero sí en la otra, se avisa para que cambiés el método.</p>
+    <p class="muted" style="font-size:12px;">Cada solicitud se mide contra la bolsa de su método de desembolso. Si no alcanza en una pero sí en la otra, se avisa para que cambiés el método. El número de fila es el orden de llegada, no una regla: podés aprobar la que quieras siempre que haya plata para esa.</p>
     ${pendientes.length===0 ? '<div class="empty">No hay solicitudes pendientes. 🎉</div>' : pendientes.map(s=>{
       const cola = colaInfo[s.id];
       return `
       <div class="mov-item pendiente">
-        <div class="mov-top"><span>${s.cliente} · solicitado por ${s.socio}</span><span class="pill ${cola.fondeable?'pill-cancelado':'pill-pendiente'}">${cola.fondeable?'Fondos disponibles':'En espera'}</span></div>
+        <div class="mov-top"><span>${s.cliente} · solicitado por ${s.socio}</span><span class="pill ${cola.enOrden?'pill-cancelado':'pill-pendiente'}">${cola.enOrden?'Fondos disponibles':cola.alcanzaSolo?'Se puede adelantar':'En espera'}</span></div>
         <div class="mov-meta">Solicitud N° ${cola.numero} en la fila de desembolso · Solicitado el ${s.fechaSolicitud}${s.nota? ' · Nota: '+s.nota:''}</div>
-        ${!cola.fondeable ? `<div class="notice warn">En espera: faltan ${formatMoney(cola.faltante)} en ${cola.bolsa==='efectivo'?'caja':'bancos'} para desembolsar por ${s.metodoDesembolso}.${cola.alternativaPosible ? ` Sí alcanza si lo desembolsás por ${cola.alternativa}.` : ' Se atenderá en cuanto haya fondos, respetando el orden de llegada.'}</div>` : ''}
+        ${!cola.alcanzaSolo ? `<div class="notice warn">En espera: faltan ${formatMoney(cola.faltante)} en ${cola.bolsa==='efectivo'?'caja':'bancos'} para desembolsar por ${s.metodoDesembolso}.${cola.alternativaPosible ? ` Sí alcanza si lo desembolsás por ${cola.alternativa}.` : ' Se atenderá en cuanto haya fondos.'}</div>`
+          : !cola.enOrden ? `<div class="notice">La plata alcanza para esta. ${cola.antes === 1 ? 'Hay 1 solicitud' : 'Hay ' + cola.antes + ' solicitudes'} antes en la fila: si aprobás esta primero, ${cola.antes === 1 ? 'esa queda esperando' : 'esas quedan esperando'} a que entre más plata.</div>` : ''}
         ${formatDetalleMetodo(s.metodoDesembolso, s.detalleMetodo) ? `<div class="notice">${s.metodoDesembolso}: ${formatDetalleMetodo(s.metodoDesembolso, s.detalleMetodo)}</div>` : ''}
         <div class="grid cols-2" style="margin-top:8px;">
           <div class="field"><label>Monto</label><input type="text" inputmode="numeric" class="sol-monto money-input" data-sol="${s.id}" value="${moneyInputValue(s.monto)}"></div>
@@ -4172,7 +4181,7 @@ function renderSolicitudesAdmin(){
           <div class="sol-comprobante-preview" data-sol="${s.id}"></div>
         </div>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          ${cola.fondeable ? `<button class="btn btn-primary btn-sm" data-action="aprobar-solicitud" data-sol="${s.id}">Aprobar y crear préstamo</button>` : `<button class="btn btn-ghost btn-sm" disabled title="Todavía no hay fondos suficientes">Aprobar y crear préstamo</button>`}
+          ${cola.alcanzaSolo ? `<button class="btn btn-primary btn-sm" data-action="aprobar-solicitud" data-sol="${s.id}">Aprobar y crear préstamo</button>` : `<button class="btn btn-ghost btn-sm" disabled title="No hay fondos suficientes para desembolsar esta solicitud">Aprobar y crear préstamo</button>`}
           <button class="btn btn-danger btn-sm" data-action="abrir-rechazo-solicitud" data-sol="${s.id}">Rechazar</button>
         </div>
       </div>
