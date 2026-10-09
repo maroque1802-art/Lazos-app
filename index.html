@@ -511,7 +511,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '5.1';
+const APP_VERSION = '5.2';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -1142,6 +1142,64 @@ function calcMora(p, hoyStr){
     diasAtraso: daysBetween(venc, hoy),
     vencimientoNuevo: formatDMY(addMonthsSameDay(venc, meses))
   };
+}
+
+/* ---------- Clientes que dejaron de abonar ----------
+   Este aviso no mira el vencimiento. Un préstamo a seis meses puede estar al
+   día en el papel y llevar dos meses sin que entre un cinco: el que se cae
+   del hábito de pagar casi nunca aparece de golpe el día del vencimiento.
+   Lo que se mide es cuándo fue el último pago.
+
+   Cuenta como pago el abono aprobado y también el que está esperando
+   aprobación: el cliente ya pagó, no hay por qué cobrarle otra vez. No
+   cuenta el que se rechazó ni el que se revirtió, porque esa plata no entró
+   o se devolvió. Si nunca ha abonado, se mide desde el día en que se le
+   entregó el préstamo. */
+const DIAS_SIN_ABONAR = 30;
+
+function ultimoPagoDe(p){
+  const fechas = movimientos(p.id)
+    .filter(m => m.tipo === 'abono' && !m.reversadoPorId
+              && (esAprobado(m) || m.estado === 'pendiente' || m.estado === 'reportado_pendiente_caja'))
+    .map(m => parseDMY(m.fecha))
+    .filter(f => f && !isNaN(f));
+  if(!fechas.length) return {desde: parseDMY(p.fecha), nunca: true};
+  return {desde: new Date(Math.max.apply(null, fechas)), nunca: false};
+}
+function diasSinAbonar(p){
+  const u = ultimoPagoDe(p);
+  return {desde: u.desde, nunca: u.nunca,
+          dias: Math.max(0, daysBetween(u.desde, todayCutoff()))};
+}
+/* Los préstamos vivos que pasaron del límite. Sin socio, los de todos. */
+function clientesSinAbonar(socioNombre){
+  return SEED.prestamos
+    .filter(p => !socioNombre || p.socio === socioNombre)
+    .filter(p => calcEstado(p) !== 'Cancelado')
+    .map(p => Object.assign({p, saldo: saldoConfirmado(p), estado: calcEstado(p)}, diasSinAbonar(p)))
+    .filter(x => x.dias > DIAS_SIN_ABONAR)
+    .sort((a,b) => b.dias - a.dias);
+}
+
+/* El mensaje que el socio le manda al cliente. Sale listo para pegarlo en
+   WhatsApp: sin formato, con los números que el cliente puede verificar
+   contra su recibo. No pide plata de golpe, pregunta cuándo puede pagar —
+   quien está atrasado casi siempre lo sabe y lo que hace falta es la fecha. */
+function mensajeRecordatorio(x){
+  const nombre = String(x.p.cliente || '').trim().split(/\s+/)[0] || '';
+  const saludo = nombre ? 'Hola ' + nombre + ', ' : 'Hola, ';
+  const quien = x.p.socio ? x.p.socio.split(/\s+/)[0] : '';
+  const desde = formatDMY(x.desde);
+  const historia = x.nunca
+    ? `Le escribo por el préstamo N° ${x.p.id}, que se le entregó el ${desde}. Todavía no tenemos ningún abono registrado.`
+    : `Le escribo por el préstamo N° ${x.p.id}. El último abono que tenemos registrado es del ${desde}, hace ${x.dias} días.`;
+  const estado = x.estado === 'Vencido'
+    ? `El plazo venció el ${x.p.vencimiento} y el saldo pendiente es de ${formatMoney(x.saldo)}.`
+    : `El saldo pendiente es de ${formatMoney(x.saldo)} y el plazo vence el ${x.p.vencimiento}.`;
+  return saludo + (quien ? 'le saluda ' + quien + ' de Lazos.' : 'le saludo de Lazos.') + '\n\n'
+       + historia + '\n' + estado + '\n\n'
+       + '¿Me puede indicar qué día podría hacer el próximo pago? Si ya lo hizo, mándeme el comprobante y lo reviso.\n\n'
+       + 'Gracias.';
 }
 
 /* Los vencidos que todavía no tienen cobrada la mora de este mes. */
@@ -3626,9 +3684,8 @@ function renderTabs(){
 }
 function renderBottomNav(){
   const icons = {cartera:'📋', registrar:'➕', solicitar:'💵', reportes:'📈', bandeja:'✉️'};
-  const pendientes = sinLeer();
   return `<div class="bottom-nav no-print">
-    ${SOCIO_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}" data-action="goto" data-screen="${id}"><span class="ic">${icons[id]}${id==='bandeja'&&pendientes?`<span class="globo">${pendientes}</span>`:''}</span>${label}</button>`).join('')}
+    ${SOCIO_TABS.map(([id,label])=>`<button class="${STATE.screen===id?'active':''}" data-action="goto" data-screen="${id}"><span class="ic">${icons[id]}${pintaGlobo(id)}</span>${label}</button>`).join('')}
   </div>`;
 }
 /* Los mismos iconos que tenia la barra de abajo, ahora en el menu lateral. */
@@ -3702,6 +3759,7 @@ function renderMiCartera(){
   // algo devuelto esperando.
   return `
   ${renderRechazadosSocio(STATE.socioActivo)}
+  ${renderSinAbonar(STATE.socioActivo)}
   <div class="card">
     <h2>Mi cartera</h2>
     <p class="muted">${STATE.socioActivo} · ${socioLoans(STATE.socioActivo).length} préstamos</p>
@@ -3981,6 +4039,38 @@ function rechazadosSinCorregir(socio){
   return movimientosPorSocio(socio)
     .filter(m => m.estado==='rechazado' && !corregidos.has(String(m.id)))
     .sort((a,b)=>(b.seq||0)-(a.seq||0));
+}
+
+/* La tarjeta de avisos de clientes que dejaron de abonar. El socio ve los
+   suyos; el administrador, los de todos, con el nombre del socio a cargo. */
+function renderSinAbonar(socioNombre){
+  const lista = clientesSinAbonar(socioNombre);
+  const esAdmin = !socioNombre;
+  if(!lista.length) return esAdmin
+    ? `<div class="card"><h3>Clientes sin abonar</h3>
+         <div class="empty">Ningún cliente lleva más de ${DIAS_SIN_ABONAR} días sin abonar. 🎉</div></div>`
+    : '';
+  return `<div class="card">
+    <h3>Sin abonar hace más de ${DIAS_SIN_ABONAR} días (${lista.length})</h3>
+    <p class="muted">Se cuenta desde el último abono, esté vencido el préstamo o no.
+      Copiá el recordatorio y pegalo en WhatsApp.</p>
+    ${lista.map(x => `
+      <div class="mov-item pendiente">
+        <div class="mov-top">
+          <span>${escapaHtml(x.p.cliente)} · N° ${x.p.id}</span>
+          <span class="pill pill-vencido">${x.dias} días</span>
+        </div>
+        <div class="mov-meta">${x.nunca
+          ? 'Sin ningún abono desde que se entregó, el ' + formatDMY(x.desde)
+          : 'Último abono el ' + formatDMY(x.desde)}${esAdmin ? ' · Socio: ' + escapaHtml(x.p.socio) : ''}</div>
+        <div class="kv"><span class="k">Saldo</span><span class="v">${formatMoney(x.saldo)}</span></div>
+        <div class="kv"><span class="k">${x.estado === 'Vencido' ? 'Venció el' : 'Vence el'}</span><span class="v">${x.p.vencimiento}</span></div>
+        <div class="no-print" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+          <button class="btn btn-primary btn-sm" data-action="copiar-recordatorio" data-prestamo="${x.p.id}">Copiar mensaje</button>
+          <button class="btn btn-ghost btn-sm" data-action="goto" data-screen="detalle" data-id="${x.p.id}">Ver préstamo</button>
+        </div>
+      </div>`).join('')}
+  </div>`;
 }
 
 function renderRechazadosSocio(socio){
@@ -4274,16 +4364,23 @@ function novedades(){
     const solicitudes = SOLICITUDES.filter(s => s.estado === 'pendiente').length;
     let mora = 0;
     try{ mora = prestamosConMoraPendiente().length; }catch(e){ mora = 0; }
-    return {porAprobar, enCaja, solicitudes, mora, sinLeer: 0,
+    let sinAbonar = 0;
+    try{ sinAbonar = clientesSinAbonar(null).length; }catch(e){ sinAbonar = 0; }
+    return {porAprobar, enCaja, solicitudes, mora, sinAbonar, sinLeer: 0,
             total: porAprobar + enCaja + solicitudes};
   }
   const sl = sinLeer();
-  return {porAprobar:0, enCaja:0, solicitudes:0, mora:0, sinLeer: sl, total: sl};
+  /* Los clientes que dejaron de abonar van en el globo de "Mi cartera", pero
+     no suman al total: igual que la mora, no los generó nadie, los generó el
+     calendario, y el numerito de la aplicación se quedaría encendido meses. */
+  let sinAbonar = 0;
+  try{ sinAbonar = clientesSinAbonar(STATE.socioActivo).length; }catch(e){ sinAbonar = 0; }
+  return {porAprobar:0, enCaja:0, solicitudes:0, mora:0, sinAbonar, sinLeer: sl, total: sl};
 }
 function globoDe(pantalla){
   const n = novedades();
   return ({aprobar:n.porAprobar, cierreCaja:n.enCaja, solicitudes:n.solicitudes,
-           vencidos:n.mora, bandeja:n.sinLeer})[pantalla] || 0;
+           vencidos:n.mora, bandeja:n.sinLeer, cartera:n.sinAbonar})[pantalla] || 0;
 }
 function pintaGlobo(pantalla){
   const c = globoDe(pantalla);
@@ -5246,6 +5343,7 @@ function renderVencidos(){
       </table></div>` : ''}
   </div>
 
+  ${renderSinAbonar(null)}
   <div class="card">
     <h3>Moras aplicadas (${aplicadas.length})</h3>
     ${aplicadas.length===0 ? '<div class="empty">Todavía no se ha cobrado ninguna mora.</div>' :
@@ -5677,6 +5775,13 @@ document.addEventListener('click', async function(e){
   if(action==='ir-registro'){ e.preventDefault(); STATE.pantallaEntrada='registro'; avisoLogin(''); render(); return; }
   if(action==='ir-login'){ e.preventDefault(); STATE.pantallaEntrada='login'; avisoLogin(''); render(); return; }
   if(action==='cambiar-rol-acceso'){ return; }
+  if(action==='copiar-recordatorio'){
+    const p = prestamoById(t.dataset.prestamo);
+    if(!p) return;
+    const x = Object.assign({p, saldo: saldoConfirmado(p), estado: calcEstado(p)}, diasSinAbonar(p));
+    await copiarAlPortapapeles(mensajeRecordatorio(x), 'Mensaje copiado. Pegalo en WhatsApp.');
+    return;
+  }
   if(action==='copiar-invitacion'){
     const a = accesoPorCorreo(t.dataset.correo);
     if(!a) return;
