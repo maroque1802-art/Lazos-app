@@ -179,6 +179,13 @@ main{padding:16px 0 40px;}
 .card{background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:16px; box-shadow:var(--shadow); margin-bottom:14px;}
 .card h2{margin:0 0 4px; font-size:19px;}
 .card h3{margin:0 0 10px; font-size:16px;}
+/* Encabezado que abre y cierra una seccion. Es un boton, pero se lee como
+   el titulo que ya estaba ahi. */
+.plegable{display:flex; width:100%; align-items:center; justify-content:space-between;
+  gap:10px; background:none; border:0; padding:0; margin:0; cursor:pointer;
+  color:var(--text); font-family:inherit; text-align:left;}
+.plegable h2{flex:1;}
+.plegable .flecha{font-size:14px; color:var(--text-muted); flex:none;}
 .muted{color:var(--text-muted); font-size:13.5px;}
 .grid{display:grid; gap:12px;}
 .grid.cols-2{grid-template-columns:1fr 1fr;}
@@ -511,7 +518,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '5.2';
+const APP_VERSION = '5.3';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -556,6 +563,10 @@ const STATE = {
   screen: 'inicio',
   screenParams: {},
   menu: false,           // el menu lateral del administrador
+  // El formulario de "solicitar a nombre de un socio" arranca cerrado: en esa
+  // pantalla lo que el administrador va a hacer casi siempre es aprobar, no
+  // escribir una solicitud nueva.
+  solicitudAbierta: false,
 
   filtroEstado: 'todos',
   busquedaCartera: '',
@@ -3150,6 +3161,7 @@ function socioLoans(socioNombre){
    ========================================================= */
 function goto(screen, params={}){
   STATE.screen = screen; STATE.screenParams = params; STATE.modal = null; STATE.menu = false;
+  STATE.solicitudAbierta = false;
   render();
   window.scrollTo({top:0, behavior:'instant'});
 }
@@ -4152,9 +4164,24 @@ function renderSolicitarPrestamo(esAdmin){
   };
   const labelSol = {pendiente:'Pendiente de aprobación', aprobada:'Aprobado', rechazada:'Rechazado'};
   const {colaInfo} = calcColaSolicitudes();
+
+  /* En la pantalla del administrador este formulario es lo de menos: lo que
+     va a hacer ahi casi siempre es aprobar lo que ya pidieron. Arranca
+     cerrado para que la fila de solicitudes quede a la vista. Al socio, en
+     cambio, esta pantalla ES el formulario, asi que nunca se le pliega. */
+  const abierto = !esAdmin || STATE.solicitudAbierta;
+  const titulo = esAdmin ? 'Solicitar préstamo a nombre de un socio' : 'Solicitar préstamo nuevo';
+  const cabecera = esAdmin
+    ? `<button class="plegable" data-action="plegar-solicitud" aria-expanded="${abierto}">
+         <h2>${titulo}</h2>
+         <span class="flecha">${abierto ? '▾ Ocultar' : '▸ Abrir'}</span>
+       </button>`
+    : `<h2>${titulo}</h2>`;
+  if(!abierto) return `<div class="card">${cabecera}</div>`;
+
   return `
   <div class="card">
-    <h2>${esAdmin ? 'Solicitar préstamo a nombre de un socio' : 'Solicitar préstamo nuevo'}</h2>
+    ${cabecera}
     <p class="muted">${esAdmin
       ? 'Para cuando el socio te pide el préstamo por fuera de la aplicación. Queda a su nombre y entra a la misma fila que las demás; aprobarla sigue siendo un paso aparte.'
       : 'Pide un préstamo nuevo para un cliente. El administrador lo revisa y, si lo aprueba, se crea solo en la tabla de Préstamos.'}</p>
@@ -5775,6 +5802,7 @@ document.addEventListener('click', async function(e){
   if(action==='ir-registro'){ e.preventDefault(); STATE.pantallaEntrada='registro'; avisoLogin(''); render(); return; }
   if(action==='ir-login'){ e.preventDefault(); STATE.pantallaEntrada='login'; avisoLogin(''); render(); return; }
   if(action==='cambiar-rol-acceso'){ return; }
+  if(action==='plegar-solicitud'){ STATE.solicitudAbierta = !STATE.solicitudAbierta; render(); return; }
   if(action==='copiar-recordatorio'){
     const p = prestamoById(t.dataset.prestamo);
     if(!p) return;
