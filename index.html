@@ -518,7 +518,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '5.5';
+const APP_VERSION = '5.6';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -551,6 +551,11 @@ const MENSAJES_LEIDOS = [];
 /* Una sola lista con los abonos historicos del Excel y los movimientos
    nuevos de la app. Los calculos del prototipo ya trabajan asi. */
 const MOVS = [];
+/* La fila de desembolso vista por completo: [{id, puesto, total}] de las
+   solicitudes pendientes, de todos los socios. Viene de la funcion
+   fila_solicitudes() (migracion 0014), que es lo unico que deja a un socio
+   contar cuantas van antes de la suya sin leer las de los demas. */
+const FILA_SOLICITUDES = [];
 
 const STATE = {
   role: null,            // 'socio' | 'admin' — lo define el perfil, no el usuario
@@ -789,6 +794,17 @@ async function cargarTodo(){
     sb.from('arqueos').select('*').order('fecha').order('id'),
     sb.from('otros_cargos').select('*').order('numero')
   ]);
+
+  /* La fila completa va por su propia funcion: la tabla solo le muestra al
+     socio sus solicitudes. Si la migracion 0014 todavia no esta aplicada,
+     esto falla y la lista queda vacia; el mensaje del puesto se calla en vez
+     de inventar un numero. */
+  FILA_SOLICITUDES.length = 0;
+  try{
+    const fila = await sb.rpc('fila_solicitudes');
+    (fila && fila.data ? fila.data : []).forEach(r => FILA_SOLICITUDES.push(
+      {id: r.id, puesto: Number(r.puesto), total: Number(r.total)}));
+  }catch(e){ /* sin la 0014 no hay fila; se sigue */ }
 
   // Sin la migración 0008 estas dos tablas no existen; que falten no debe
   // tumbar la carga entera.
@@ -4206,6 +4222,30 @@ function formatDetalleMetodo(metodo, detalle){
   }
   return '';
 }
+/* En qué puesto de la fila va una solicitud. La fila es UNA SOLA para todos
+   los socios y para los dos métodos de desembolso: el socio que espera no
+   tiene por qué llevar dos cuentas según le vayan a pagar en efectivo o por
+   banco.
+
+   El número sale de fila_solicitudes(), no de lo que el socio tiene cargado:
+   él solo ve sus propias solicitudes, así que contando las suyas siempre
+   creería ir de primero. */
+function puestoEnFila(solId){
+  const f = FILA_SOLICITUDES.find(x => mismoId(x.id, solId));
+  return f || null;
+}
+function lugarEnFila(solId){
+  const f = puestoEnFila(solId);
+  // Sin la migración 0014 no hay fila que contar: mejor callarse que mentir.
+  if(!f) return '';
+  const puesto = f.total === 1
+    ? 'Es la <b>única solicitud pendiente</b> en la fila.'
+    : `Va de <b>N° ${f.puesto} en la fila</b>, de ${f.total} solicitudes pendientes.`;
+  return `<div class="notice">${puesto}
+    La fila es una sola para todos los socios, sea cual sea el método de desembolso,
+    y va por orden de llegada. El administrador puede adelantar alguna si hace falta.</div>`;
+}
+
 function renderSolicitarPrestamo(esAdmin){
   const socioSel = esAdmin
     ? (STATE.screenParams.socioSolSel || SEED.socios[0].nombre)
@@ -4216,7 +4256,6 @@ function renderSolicitarPrestamo(esAdmin){
     pendiente:'pill-pendiente', aprobada:'pill-cancelado', rechazada:'pill-rechazado'
   };
   const labelSol = {pendiente:'Pendiente de aprobación', aprobada:'Aprobado', rechazada:'Rechazado'};
-  const {colaInfo} = calcColaSolicitudes();
 
   /* En la pantalla del administrador este formulario es lo de menos: lo que
      va a hacer ahi casi siempre es aprobar lo que ya pidieron. Arranca
@@ -4271,7 +4310,7 @@ function renderSolicitarPrestamo(esAdmin){
       <div class="mov-item ${s.estado==='pendiente'?'pendiente':s.estado==='rechazada'?'rechazado':'aprobado'}">
         <div class="mov-top"><span>${s.cliente} · ${formatMoney(s.monto)} a ${s.plazo} meses</span><span class="pill ${pillSol[s.estado]}">${labelSol[s.estado]}</span></div>
         <div class="mov-meta">Solicitado el ${s.fechaSolicitud} · Interés propuesto: ${formatMoney(s.interesPropuesto)}</div>
-        ${s.estado==='pendiente' && colaInfo[s.id] ? `<div class="mov-meta">Solicitud N° ${colaInfo[s.id].numero} en la fila de desembolso${colaInfo[s.id].enOrden ? ' · hay fondos disponibles' : colaInfo[s.id].alcanzaSolo ? ' · hay fondos, pero van otras antes' : ` · en espera, faltan ${formatMoney(colaInfo[s.id].faltante)} en ${colaInfo[s.id].bolsa==='efectivo'?'caja':'bancos'}`}</div>` : ''}
+        ${s.estado==='pendiente' ? lugarEnFila(s.id) : ''}
         <div class="mov-meta">${s.metodoDesembolso}${formatDetalleMetodo(s.metodoDesembolso, s.detalleMetodo) ? ' · '+formatDetalleMetodo(s.metodoDesembolso, s.detalleMetodo) : ''}</div>
         ${s.estado==='aprobada' ? `<div class="mov-meta">Se creó el préstamo N° ${s.prestamoIdAsignado}.</div>` : ''}
         ${s.estado==='rechazada' ? `<div class="mov-meta" style="color:var(--danger)">Motivo: ${s.motivoRechazo}</div>` : ''}
