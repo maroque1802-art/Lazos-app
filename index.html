@@ -518,7 +518,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '5.3';
+const APP_VERSION = '5.4';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -4228,7 +4228,12 @@ function renderSolicitarPrestamo(esAdmin){
 }
 
 /* ---------- ADMIN: Solicitudes de préstamo ---------- */
-function calcColaSolicitudes(){
+/* `ajustes` es lo que el administrador tiene escrito en las tarjetas en este
+   momento: {idSolicitud: {monto, metodo}}. Mientras no apruebe, eso manda
+   sobre lo que pidió el socio. Si cambia Efectivo por Sinpe, la plata que hay
+   que mirar es la del banco, no la de la caja. Sin ajustes se miden los
+   valores guardados, que es lo que necesita la pantalla del socio. */
+function calcColaSolicitudes(ajustes){
   const pendientes = SOLICITUDES.filter(s=>s.estado==='pendiente').sort((a,b)=>a.orden-b.orden);
   const saldos = saldosDisponibles();
   // Cada bolsa se consume por aparte: lo que se desembolsa por banco no baja la caja.
@@ -4241,25 +4246,86 @@ function calcColaSolicitudes(){
      la segunda y dejar la primera esperando. Antes el botón de aprobar se
      deshabilitaba con la pregunta 2 y no había forma de hacerlo. */
   pendientes.forEach((s,idx)=>{
-    const bolsa = esMetodoEfectivo(s.metodoDesembolso) ? 'efectivo' : 'bancos';
-    const alcanzaSolo = s.monto <= saldos[bolsa];
-    const enOrden = s.monto <= restante[bolsa];
+    const a = (ajustes || {})[s.id] || {};
+    const monto  = a.monto > 0 ? a.monto : s.monto;
+    const metodo = a.metodo || s.metodoDesembolso;
+    const bolsa = esMetodoEfectivo(metodo) ? 'efectivo' : 'bancos';
+    const alcanzaSolo = monto <= saldos[bolsa];
+    const enOrden = monto <= restante[bolsa];
     // La otra bolsa puede cubrirlo si se cambia el método de desembolso.
     const otraBolsa = bolsa==='efectivo' ? 'bancos' : 'efectivo';
     colaInfo[s.id] = {
       numero: idx+1,
       bolsa,
+      monto,
+      metodo,
       alcanzaSolo,
       enOrden,
       antes: idx,
-      faltante: Math.max(0, s.monto - saldos[bolsa]),
-      alternativaPosible: !alcanzaSolo && s.monto <= saldos[otraBolsa],
+      faltante: Math.max(0, monto - saldos[bolsa]),
+      alternativaPosible: !alcanzaSolo && monto <= saldos[otraBolsa],
       alternativa: otraBolsa==='efectivo' ? 'efectivo' : 'transferencia o Sinpe'
     };
-    if(enOrden) restante[bolsa] -= s.monto;
+    if(enOrden) restante[bolsa] -= monto;
   });
   return {pendientes, disponible: saldos.total, saldos, colaInfo};
 }
+/* Los tres pedazos de la tarjeta que cambian cuando el administrador toca el
+   monto o el método. Se dibujan aparte para poder refrescarlos solos, sin
+   volver a pintar la pantalla: si redibujáramos, se perdería el comprobante
+   que ya hubiera adjuntado. */
+function pillSolicitud(cola){
+  return `<span class="pill ${cola.enOrden?'pill-cancelado':'pill-pendiente'}">${
+    cola.enOrden ? 'Fondos disponibles' : cola.alcanzaSolo ? 'Se puede adelantar' : 'En espera'}</span>`;
+}
+function avisoSolicitud(cola){
+  if(!cola.alcanzaSolo){
+    return `<div class="notice warn">En espera: faltan ${formatMoney(cola.faltante)} en ${
+      cola.bolsa==='efectivo'?'caja':'bancos'} para desembolsar por ${cola.metodo}.${
+      cola.alternativaPosible ? ` Sí alcanza si lo desembolsás por ${cola.alternativa}: cambiá el método aquí abajo.` : ' Se atenderá en cuanto haya fondos.'}</div>`;
+  }
+  if(!cola.enOrden){
+    return `<div class="notice">La plata alcanza para esta. ${
+      cola.antes === 1 ? 'Hay 1 solicitud' : 'Hay ' + cola.antes + ' solicitudes'} antes en la fila: si aprobás esta primero, ${
+      cola.antes === 1 ? 'esa queda esperando' : 'esas quedan esperando'} a que entre más plata.</div>`;
+  }
+  return '';
+}
+function botonesSolicitud(s, cola){
+  return `${cola.alcanzaSolo
+      ? `<button class="btn btn-primary btn-sm" data-action="aprobar-solicitud" data-sol="${s.id}">Aprobar y crear préstamo</button>`
+      : `<button class="btn btn-ghost btn-sm" data-sol="${s.id}" disabled title="No hay fondos suficientes para desembolsar esta solicitud por ese método">Aprobar y crear préstamo</button>`}
+    <button class="btn btn-danger btn-sm" data-action="abrir-rechazo-solicitud" data-sol="${s.id}">Rechazar</button>`;
+}
+
+/* Vuelve a medir los fondos con lo que hay escrito en pantalla. Se llama cada
+   vez que el administrador cambia el método o el monto de una solicitud: sin
+   esto, cambiaba Efectivo por Sinpe y el botón de aprobar seguía apagado,
+   porque la cuenta se seguía haciendo contra la caja. */
+function ajustesSolicitudesEnPantalla(){
+  const out = {};
+  const pon = (id, campo, valor) => { (out[id] = out[id] || {})[campo] = valor; };
+  document.querySelectorAll('.sol-metodo[data-sol]').forEach(sel => pon(sel.dataset.sol, 'metodo', sel.value));
+  document.querySelectorAll('.sol-monto[data-sol]').forEach(inp => {
+    const m = parseMoneyInputValue(inp.value);
+    if(m > 0) pon(inp.dataset.sol, 'monto', m);
+  });
+  return out;
+}
+function refrescarFondosSolicitudes(){
+  const {pendientes, colaInfo} = calcColaSolicitudes(ajustesSolicitudesEnPantalla());
+  pendientes.forEach(s => {
+    const cola = colaInfo[s.id];
+    const pon = (attr, html) => {
+      const el = document.querySelector(`[${attr}="${s.id}"]`);
+      if(el) el.innerHTML = html;
+    };
+    pon('data-sol-pill', pillSolicitud(cola));
+    pon('data-sol-aviso', avisoSolicitud(cola));
+    pon('data-sol-botones', botonesSolicitud(s, cola));
+  });
+}
+
 function renderSolicitudesAdmin(){
   const {pendientes, saldos, colaInfo} = calcColaSolicitudes();
   const historial = SOLICITUDES.filter(s=>s.estado!=='pendiente').slice().reverse();
@@ -4275,10 +4341,9 @@ function renderSolicitudesAdmin(){
       const cola = colaInfo[s.id];
       return `
       <div class="mov-item pendiente">
-        <div class="mov-top"><span>${s.cliente} · solicitado por ${s.socio}</span><span class="pill ${cola.enOrden?'pill-cancelado':'pill-pendiente'}">${cola.enOrden?'Fondos disponibles':cola.alcanzaSolo?'Se puede adelantar':'En espera'}</span></div>
+        <div class="mov-top"><span>${s.cliente} · solicitado por ${s.socio}</span><span data-sol-pill="${s.id}">${pillSolicitud(cola)}</span></div>
         <div class="mov-meta">Solicitud N° ${cola.numero} en la fila de desembolso · Solicitado el ${s.fechaSolicitud}${s.nota? ' · Nota: '+s.nota:''}</div>
-        ${!cola.alcanzaSolo ? `<div class="notice warn">En espera: faltan ${formatMoney(cola.faltante)} en ${cola.bolsa==='efectivo'?'caja':'bancos'} para desembolsar por ${s.metodoDesembolso}.${cola.alternativaPosible ? ` Sí alcanza si lo desembolsás por ${cola.alternativa}.` : ' Se atenderá en cuanto haya fondos.'}</div>`
-          : !cola.enOrden ? `<div class="notice">La plata alcanza para esta. ${cola.antes === 1 ? 'Hay 1 solicitud' : 'Hay ' + cola.antes + ' solicitudes'} antes en la fila: si aprobás esta primero, ${cola.antes === 1 ? 'esa queda esperando' : 'esas quedan esperando'} a que entre más plata.</div>` : ''}
+        <div data-sol-aviso="${s.id}">${avisoSolicitud(cola)}</div>
         ${formatDetalleMetodo(s.metodoDesembolso, s.detalleMetodo) ? `<div class="notice">${s.metodoDesembolso}: ${formatDetalleMetodo(s.metodoDesembolso, s.detalleMetodo)}</div>` : ''}
         <div class="grid cols-2" style="margin-top:8px;">
           <div class="field"><label>Monto</label><input type="text" inputmode="numeric" class="sol-monto money-input" data-sol="${s.id}" value="${moneyInputValue(s.monto)}"></div>
@@ -4286,7 +4351,7 @@ function renderSolicitudesAdmin(){
           <div class="field"><label>Intereses a cobrar</label><input type="text" inputmode="numeric" class="sol-interes money-input" data-sol="${s.id}" value="${moneyInputValue(s.interesPropuesto)}"></div>
           <div class="field"><label>Método de desembolso</label>
             <select class="sol-metodo" data-sol="${s.id}">
-              ${['Efectivo','Transferencia','SINPE Móvil'].map(m=>`<option ${m===s.metodoDesembolso?'selected':''}>${m}</option>`).join('')}
+              ${['Efectivo','Transferencia','SINPE Móvil'].map(m=>`<option ${m===cola.metodo?'selected':''}>${m}</option>`).join('')}
             </select>
           </div>
           <div class="field"><label>Fecha de desembolso</label><input type="date" class="sol-fecha" data-sol="${s.id}" value="${dmyToInputDate(SEED.fechaCorte)}"></div>
@@ -4297,10 +4362,7 @@ function renderSolicitudesAdmin(){
           <input type="hidden" class="sol-comprobante-value" data-sol="${s.id}">
           <div class="sol-comprobante-preview" data-sol="${s.id}"></div>
         </div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          ${cola.alcanzaSolo ? `<button class="btn btn-primary btn-sm" data-action="aprobar-solicitud" data-sol="${s.id}">Aprobar y crear préstamo</button>` : `<button class="btn btn-ghost btn-sm" disabled title="No hay fondos suficientes para desembolsar esta solicitud">Aprobar y crear préstamo</button>`}
-          <button class="btn btn-danger btn-sm" data-action="abrir-rechazo-solicitud" data-sol="${s.id}">Rechazar</button>
-        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;" data-sol-botones="${s.id}">${botonesSolicitud(s, cola)}</div>
       </div>
     `; }).join('')}
   </div>
@@ -5859,6 +5921,15 @@ document.addEventListener('click', async function(e){
     const metodo = document.querySelector(`.sol-metodo[data-sol="${solId}"]`).value;
     const fechaInput = document.querySelector(`.sol-fecha[data-sol="${solId}"]`).value;
     if(!monto || monto<=0 || !plazo || plazo<=0 || !fechaInput){ toast('Revisa los datos del préstamo antes de aprobar.'); return; }
+    /* Ultima revision antes de crear el prestamo: la bolsa del metodo elegido
+       tiene que cubrir el monto. Si no, no se desembolsa de una bolsa vacia. */
+    const bolsaFinal = esMetodoEfectivo(metodo) ? 'efectivo' : 'bancos';
+    const hay = saldosDisponibles()[bolsaFinal];
+    if(monto > hay){
+      toast(`No alcanza: hay ${formatMoney(hay)} en ${bolsaFinal==='efectivo'?'caja':'bancos'} y el desembolso es de ${formatMoney(monto)}.`);
+      refrescarFondosSolicitudes();
+      return;
+    }
     const [y,m,d] = fechaInput.split('-');
     const comprobanteImg = document.querySelector(`.sol-comprobante-value[data-sol="${solId}"]`).value;
     await aprobarSolicitud(solId, {monto, plazo, intereses, metodo, fechaDesembolso:`${d}/${m}/${y}`, comprobanteImg});
@@ -6061,6 +6132,7 @@ document.addEventListener('change', function(e){
   }
   if(e.target.id==='reg-socio'){ STATE.screenParams = {...STATE.screenParams, socioSel:e.target.value}; render(); return; }
   if(e.target.id==='sol-socio'){ STATE.screenParams = {...STATE.screenParams, socioSolSel:e.target.value}; render(); return; }
+  if(e.target.classList.contains('sol-metodo')){ refrescarFondosSolicitudes(); return; }
   if(e.target.id==='sol-metodo-desembolso'){
     document.getElementById('sol-metodo-detalle').innerHTML = renderSolMetodoDetalle(e.target.value);
     return;
@@ -6245,6 +6317,7 @@ document.addEventListener('input', function(e){
   if(e.target.classList.contains('money-input')){
     formatMoneyInputLive(e.target);
   }
+  if(e.target.classList.contains('sol-monto')){ refrescarFondosSolicitudes(); return; }
   if(e.target.id==='sol-monto' || e.target.id==='sol-plazo'){
     const monto = parseMoneyInputValue(document.getElementById('sol-monto').value);
     const plazo = Number(document.getElementById('sol-plazo').value)||0;
