@@ -518,7 +518,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '5.4';
+const APP_VERSION = '5.5';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -4053,6 +4053,40 @@ function rechazadosSinCorregir(socio){
     .sort((a,b)=>(b.seq||0)-(a.seq||0));
 }
 
+/* La misma lista, pero en texto plano para mandarsela al socio por mensaje.
+   Un socio no necesita la de los demas, asi que se arma por socio; sin socio
+   sale la de todos, agrupada, para tenerla de un vistazo. */
+function listaSinAbonarTexto(socioNombre){
+  const lista = clientesSinAbonar(socioNombre);
+  const plata = lista.reduce((a, x) => a + x.saldo, 0);
+  const linea = (x, i) => `${i + 1}. ${x.p.cliente} · préstamo N° ${x.p.id} · ${x.dias} días`
+    + ` · saldo ${formatMoney(x.saldo)}`
+    + (x.nunca ? ` · sin ningún abono desde el ${formatDMY(x.desde)}`
+               : ` · último abono el ${formatDMY(x.desde)}`)
+    + (x.estado === 'Vencido' ? ` · VENCIDO el ${x.p.vencimiento}` : ` · vence el ${x.p.vencimiento}`);
+
+  const encabezado = `Clientes sin abonar hace más de ${DIAS_SIN_ABONAR} días`
+    + (socioNombre ? ' — ' + socioNombre : '')
+    + `\nAl ${SEED.fechaCorte}\n`;
+  if(!lista.length) return encabezado + '\nNinguno. Todos al día. 🎉';
+
+  let cuerpo;
+  if(socioNombre){
+    cuerpo = lista.map(linea).join('\n');
+  } else {
+    // Agrupadas por socio, respetando el orden de mas atrasado a menos.
+    const porSocio = [];
+    lista.forEach(x => {
+      let g = porSocio.find(y => y.socio === x.p.socio);
+      if(!g){ g = {socio: x.p.socio, items: []}; porSocio.push(g); }
+      g.items.push(x);
+    });
+    cuerpo = porSocio.map(g => `${g.socio} (${g.items.length})\n` + g.items.map(linea).join('\n')).join('\n\n');
+  }
+  return `${encabezado}\n${cuerpo}\n\nTotal: ${lista.length} ${lista.length === 1 ? 'cliente' : 'clientes'}`
+       + ` - ${formatMoney(plata)} de saldo pendiente.`;
+}
+
 /* La tarjeta de avisos de clientes que dejaron de abonar. El socio ve los
    suyos; el administrador, los de todos, con el nombre del socio a cargo. */
 function renderSinAbonar(socioNombre){
@@ -4066,6 +4100,7 @@ function renderSinAbonar(socioNombre){
     <h3>Sin abonar hace más de ${DIAS_SIN_ABONAR} días (${lista.length})</h3>
     <p class="muted">Se cuenta desde el último abono, esté vencido el préstamo o no.
       Copiá el recordatorio y pegalo en WhatsApp.</p>
+    ${esAdmin ? renderBotonesListaSinAbonar(lista) : ''}
     ${lista.map(x => `
       <div class="mov-item pendiente">
         <div class="mov-top">
@@ -4082,6 +4117,24 @@ function renderSinAbonar(socioNombre){
           <button class="btn btn-ghost btn-sm" data-action="goto" data-screen="detalle" data-id="${x.p.id}">Ver préstamo</button>
         </div>
       </div>`).join('')}
+  </div>`;
+}
+
+/* Un boton por socio con clientes en la lista, para mandarle a cada uno la
+   suya. El de "todos" sirve para guardarla o repasarla de una sola vez. */
+function renderBotonesListaSinAbonar(lista){
+  const socios = [];
+  lista.forEach(x => { if(!socios.includes(x.p.socio)) socios.push(x.p.socio); });
+  if(!socios.length) return '';
+  const boton = (texto, socio) =>
+    `<button class="btn btn-ghost btn-sm" data-action="copiar-lista-sin-abonar"${
+      socio ? ` data-socio="${escapaHtml(socio)}"` : ''}>${escapaHtml(texto)}</button>`;
+  return `<div class="no-print" style="margin:10px 0 14px;">
+    <div class="muted" style="font-size:12.5px; margin-bottom:6px;">Copiar la lista en texto para mandársela por mensaje:</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      ${socios.map(n => boton(n + ' (' + lista.filter(x => x.p.socio === n).length + ')', n)).join('')}
+      ${socios.length > 1 ? boton('Todos (' + lista.length + ')', '') : ''}
+    </div>
   </div>`;
 }
 
@@ -5865,6 +5918,12 @@ document.addEventListener('click', async function(e){
   if(action==='ir-login'){ e.preventDefault(); STATE.pantallaEntrada='login'; avisoLogin(''); render(); return; }
   if(action==='cambiar-rol-acceso'){ return; }
   if(action==='plegar-solicitud'){ STATE.solicitudAbierta = !STATE.solicitudAbierta; render(); return; }
+  if(action==='copiar-lista-sin-abonar'){
+    const socio = t.dataset.socio || null;
+    await copiarAlPortapapeles(listaSinAbonarTexto(socio),
+      'Lista copiada. Pegala en el mensaje' + (socio ? ' para ' + socio.split(/\s+/)[0] : '') + '.');
+    return;
+  }
   if(action==='copiar-recordatorio'){
     const p = prestamoById(t.dataset.prestamo);
     if(!p) return;
