@@ -518,7 +518,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '5.6';
+const APP_VERSION = '5.7';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -556,6 +556,13 @@ const MOVS = [];
    fila_solicitudes() (migracion 0014), que es lo unico que deja a un socio
    contar cuantas van antes de la suya sin leer las de los demas. */
 const FILA_SOLICITUDES = [];
+/* Cuanto pide la fila entera, separado por bolsa. De resumen_solicitudes()
+   (migracion 0015): totales nada mas, ninguna solicitud suelta. */
+const RESUMEN_FILA = {hay:false, pendientes:0, montoTotal:0, montoEfectivo:0, montoBancos:0};
+/* El disponible por bolsa que publico la aplicacion del administrador.
+   Un socio no puede calcularlo: la RLS solo le deja ver sus propios
+   prestamos y movimientos, asi que la resta le sale con media cartera. */
+const DISPONIBLE_PUB = {hay:false, efectivo:0, bancos:0, calculadoEn:null};
 
 const STATE = {
   role: null,            // 'socio' | 'admin' — lo define el perfil, no el usuario
@@ -806,6 +813,32 @@ async function cargarTodo(){
       {id: r.id, puesto: Number(r.puesto), total: Number(r.total)}));
   }catch(e){ /* sin la 0014 no hay fila; se sigue */ }
 
+  /* Cuanto pide la fila y cuanto hay para pagarla. Las dos cosas le hacen
+     falta al socio ANTES de pedir, y ninguna la puede calcular el solo. */
+  RESUMEN_FILA.hay = false;
+  try{
+    const r = await sb.rpc('resumen_solicitudes');
+    const f = r && r.data ? (Array.isArray(r.data) ? r.data[0] : r.data) : null;
+    if(f){
+      RESUMEN_FILA.hay = true;
+      RESUMEN_FILA.pendientes    = Number(f.pendientes || 0);
+      RESUMEN_FILA.montoTotal    = Number(f.monto_total || 0);
+      RESUMEN_FILA.montoEfectivo = Number(f.monto_efectivo || 0);
+      RESUMEN_FILA.montoBancos   = Number(f.monto_bancos || 0);
+    }
+  }catch(e){ /* sin la 0015 no hay resumen; se sigue */ }
+
+  DISPONIBLE_PUB.hay = false;
+  try{
+    const d = await sb.from('disponible_publicado').select('*').maybeSingle();
+    if(d && d.data){
+      DISPONIBLE_PUB.hay = true;
+      DISPONIBLE_PUB.efectivo = Number(d.data.efectivo || 0);
+      DISPONIBLE_PUB.bancos   = Number(d.data.bancos || 0);
+      DISPONIBLE_PUB.calculadoEn = d.data.calculado_en || null;
+    }
+  }catch(e){ /* sin la 0015 no hay publicacion; se sigue */ }
+
   // Sin la migración 0008 estas dos tablas no existen; que falten no debe
   // tumbar la carga entera.
   MORAS.length = 0;
@@ -890,6 +923,41 @@ async function cargarTodo(){
   // mandaba la bolsa de efectivo a negativo hasta el siguiente login.
   // Es una estimación; el número de verdad se pone en Configuración.
   CONFIG.saldoInicialEfectivo = CONFIG.saldoInicialEfectivo || calcularSaldoInicialEfectivoSugerido();
+
+  publicarDisponible();
+}
+
+/* El disponible solo lo puede calcular el administrador, porque es el unico
+   que ve la cartera entera. Asi que su aplicacion lo deja escrito para que
+   los socios lo lean cuando van a pedir un prestamo.
+
+   No se vuelve viejo: el disponible solo cambia por algo que hace el
+   administrador -aprobar un abono, crear un prestamo, un traspaso, un
+   arqueo, un cargo- y despues de cada una de esas cosas corre cargarTodo,
+   que es quien llama aqui. Lo que registra un socio queda pendiente y no
+   mueve ninguna bolsa hasta que alguien lo apruebe.
+
+   Va sin await a proposito: es un apunte al margen, no puede retrasar la
+   pantalla ni tumbarla si la migracion 0015 todavia no esta puesta. */
+function publicarDisponible(){
+  if(STATE.role !== 'admin') return;
+  let s;
+  try{ s = saldosDisponibles(); }catch(e){ return; }
+  const efectivo = Math.round(s.efectivo), bancos = Math.round(s.bancos);
+  if(DISPONIBLE_PUB.hay
+     && Math.round(DISPONIBLE_PUB.efectivo) === efectivo
+     && Math.round(DISPONIBLE_PUB.bancos) === bancos) return;
+  DISPONIBLE_PUB.hay = true;
+  DISPONIBLE_PUB.efectivo = efectivo;
+  DISPONIBLE_PUB.bancos = bancos;
+  try{
+    const p = sb.from('disponible_publicado').update({
+      efectivo, bancos,
+      calculado_en: new Date().toISOString(),
+      calculado_por: 'Administrador'
+    }).eq('id', true);
+    if(p && p.then) p.then(()=>{}, ()=>{});
+  }catch(e){ /* sin la 0015 no hay donde publicarlo */ }
 }
 
 function socioIdPorNombre(nombre){
@@ -4246,6 +4314,81 @@ function lugarEnFila(solId){
     y va por orden de llegada. El administrador puede adelantar alguna si hace falta.</div>`;
 }
 
+/* ---------- El aviso de disponibilidad dentro del formulario ----------
+   Lo que el socio necesita saber ANTES de pedir: si hay plata en la bolsa del
+   método que eligió, y cuánto de esa plata ya está apartado por las
+   solicitudes que van antes. Sin esto pedía a ciegas y se enteraba después.
+
+   El administrador ve el número en vivo, que es exacto. El socio ve el que
+   publicó la aplicación del administrador: él no puede calcularlo, porque
+   solo ve su parte de la cartera, y con media cartera la resta da mal. */
+function disponibleParaAviso(){
+  if(STATE.role === 'admin'){
+    try{
+      const s = saldosDisponibles();
+      return {hay:true, efectivo: s.efectivo, bancos: s.bancos, enVivo:true};
+    }catch(e){ /* cae al publicado */ }
+  }
+  return {hay: DISPONIBLE_PUB.hay, efectivo: DISPONIBLE_PUB.efectivo,
+          bancos: DISPONIBLE_PUB.bancos, enVivo:false};
+}
+
+function avisoDisponible(metodo, monto){
+  const d = disponibleParaAviso();
+  const efectivo = esMetodoEfectivo(metodo);
+  const bolsa = efectivo ? 'efectivo' : 'bancos';
+  const nombreBolsa = efectivo ? 'efectivo' : 'transferencia o Sinpe';
+  const otraBolsa = efectivo ? 'transferencia o Sinpe' : 'efectivo';
+
+  // Cuántas van antes y cuánto piden. Si no está la 0015, se calla el monto.
+  const fila = RESUMEN_FILA.hay ? RESUMEN_FILA : null;
+  const enFila = fila ? fila.pendientes : FILA_SOLICITUDES.length;
+  const apartado = fila ? (efectivo ? fila.montoEfectivo : fila.montoBancos) : 0;
+
+  const lineas = [];
+  if(d.hay){
+    const hay = efectivo ? d.efectivo : d.bancos;
+    const hayOtra = efectivo ? d.bancos : d.efectivo;
+    const libre = hay - apartado;
+    lineas.push(`Hay <b>${formatMoney(hay)}</b> para desembolsar por ${nombreBolsa}.`);
+    if(enFila > 0 && fila){
+      lineas.push(apartado > 0
+        ? `${enFila === 1 ? 'Hay 1 solicitud' : 'Hay ' + enFila + ' solicitudes'} en la fila antes que la tuya, de las cuales ${formatMoney(apartado)} salen de esa misma bolsa. Quedarían <b>${formatMoney(Math.max(0, libre))}</b> libres.`
+        : `${enFila === 1 ? 'Hay 1 solicitud' : 'Hay ' + enFila + ' solicitudes'} en la fila antes que la tuya, pero ninguna sale de esa bolsa.`);
+    } else if(enFila > 0){
+      lineas.push(`${enFila === 1 ? 'Hay 1 solicitud' : 'Hay ' + enFila + ' solicitudes'} en la fila antes que la tuya.`);
+    } else {
+      lineas.push('No hay otras solicitudes en la fila.');
+    }
+    if(monto > 0){
+      if(monto <= libre) lineas.push(`Con <b>${formatMoney(monto)}</b> alcanza.`);
+      else if(monto <= hay) lineas.push(`Con <b>${formatMoney(monto)}</b> alcanza la plata, pero contando las que van antes faltarían ${formatMoney(monto - libre)}.`);
+      else lineas.push(`Con <b>${formatMoney(monto)}</b> no alcanza hoy: faltarían ${formatMoney(monto - hay)}.`);
+      if(monto > libre && monto <= hayOtra - (fila ? (efectivo ? fila.montoBancos : fila.montoEfectivo) : 0))
+        lineas.push(`Sí alcanzaría pidiéndolo por ${otraBolsa}.`);
+    }
+  } else if(enFila > 0){
+    lineas.push(`${enFila === 1 ? 'Hay 1 solicitud' : 'Hay ' + enFila + ' solicitudes'} en la fila antes que la tuya.`);
+  } else {
+    return '';
+  }
+
+  const clase = d.hay && monto > 0 && monto > (efectivo ? d.efectivo : d.bancos) ? 'notice warn' : 'notice';
+  return `<div class="${clase}">${lineas.join(' ')}
+    <span class="muted" style="display:block; margin-top:4px; font-size:12px;">Es una referencia para que sepás con qué contás. Aprobarla la decide el administrador.</span></div>`;
+}
+
+/* Repinta solo el aviso: redibujar la pantalla entera borraría lo que la
+   persona lleva escrito en el formulario. */
+function refrescarAvisoDisponible(){
+  const caja = document.getElementById('sol-disponible');
+  if(!caja) return;
+  const sel = document.getElementById('sol-metodo-desembolso');
+  const inp = document.getElementById('sol-monto');
+  caja.innerHTML = avisoDisponible(sel ? sel.value : 'Efectivo',
+                                   inp ? parseMoneyInputValue(inp.value) : 0);
+}
+
 function renderSolicitarPrestamo(esAdmin){
   const socioSel = esAdmin
     ? (STATE.screenParams.socioSolSel || SEED.socios[0].nombre)
@@ -4299,6 +4442,7 @@ function renderSolicitarPrestamo(esAdmin){
         </select>
       </div>
       <div id="sol-metodo-detalle">${renderSolMetodoDetalle('Efectivo')}</div>
+      <div id="sol-disponible">${avisoDisponible('Efectivo', 0)}</div>
       <div class="field"><label>Nota (opcional)</label><textarea name="nota" placeholder="Contexto para el administrador..."></textarea></div>
       <div id="sol-preview" class="notice">Escribe el monto y el plazo para ver el interés estimado (tasa actual: ${CONFIG.tasaMensual}% mensual).</div>
       <button type="submit" class="btn btn-primary btn-block">Enviar solicitud</button>
@@ -6233,6 +6377,7 @@ document.addEventListener('change', function(e){
   if(e.target.classList.contains('sol-metodo')){ refrescarFondosSolicitudes(); return; }
   if(e.target.id==='sol-metodo-desembolso'){
     document.getElementById('sol-metodo-detalle').innerHTML = renderSolMetodoDetalle(e.target.value);
+    refrescarAvisoDisponible();
     return;
   }
   if(e.target.classList.contains('sol-comprobante-file')){
@@ -6416,6 +6561,7 @@ document.addEventListener('input', function(e){
     formatMoneyInputLive(e.target);
   }
   if(e.target.classList.contains('sol-monto')){ refrescarFondosSolicitudes(); return; }
+  if(e.target.id==='sol-monto'){ refrescarAvisoDisponible(); }
   if(e.target.id==='sol-monto' || e.target.id==='sol-plazo'){
     const monto = parseMoneyInputValue(document.getElementById('sol-monto').value);
     const plazo = Number(document.getElementById('sol-plazo').value)||0;
@@ -6765,6 +6911,8 @@ async function entrar(sesion){
   // mas amplio manda, y desde ahi ve tambien su propia cartera.
   STATE.screen = STATE.role === 'admin' ? 'tablero' : 'cartera';
   STATE.screenParams = {};
+  // La primera carga corrio antes de saber el rol, asi que ahi no se publico.
+  publicarDisponible();
   render();
   arrancarVigilancia();
 }
