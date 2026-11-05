@@ -518,7 +518,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '5.7';
+const APP_VERSION = '5.8';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -4314,6 +4314,77 @@ function lugarEnFila(solId){
     y va por orden de llegada. El administrador puede adelantar alguna si hace falta.</div>`;
 }
 
+/* ---------- Un cliente, un préstamo activo por socio ----------
+   La regla: un socio no puede tener dos préstamos activos a nombre de la
+   misma persona. Con otro socio sí se puede —son carteras aparte— y los que
+   ya estaban quedan como están; esto solo mira hacia adelante.
+
+   Activo es con saldo pendiente. Un préstamo cancelado no estorba: a quien
+   ya pagó se le vuelve a prestar, que de eso vive el negocio.
+
+   Cuenta también la solicitud que todavía no se ha aprobado. Si no, bastaba
+   con mandar dos seguidas antes de que el administrador mirara la primera, y
+   el control no servía para nada.
+
+   El nombre se compara sin tildes, sin mayúsculas y sin espacios de más:
+   "José  Pérez" y "jose perez" son la misma persona. Lo que no puede hacer
+   es adivinar que "Key" y "Key Vargas" son la misma; para eso avisa aparte,
+   sin bloquear, porque también podrían ser dos personas distintas. */
+function normalizaNombre(t){
+  return String(t == null ? '' : t)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().trim().replace(/\s+/g, ' ');
+}
+/* `exceptoSol` es la solicitud que se está mirando: al aprobarla no puede
+   chocar consigo misma. */
+function choqueCliente(socioNombre, cliente, exceptoSol){
+  const n = normalizaNombre(cliente);
+  const vacio = {bloquea:false, prestamos:[], solicitudes:[], parecidos:[]};
+  if(!n || !socioNombre) return vacio;
+
+  const activos = SEED.prestamos.filter(p => p.socio === socioNombre
+                                          && calcEstado(p) !== 'Cancelado');
+  const prestamos = activos.filter(p => normalizaNombre(p.cliente) === n);
+  const solicitudes = SOLICITUDES.filter(s => s.socio === socioNombre
+                                           && s.estado === 'pendiente'
+                                           && normalizaNombre(s.cliente) === n
+                                           && !(exceptoSol && mismoId(s.id, exceptoSol)));
+  /* Nombres donde uno empieza igual que el otro: "Key" contra "Key Vargas".
+     Casi siempre es la misma persona escrita de dos maneras, pero no siempre,
+     así que se avisa y se deja seguir. */
+  const empiezaIgual = (a, b) => a !== b && (a + ' ').startsWith(b + ' ');
+  const parecidos = [];
+  activos.forEach(p => {
+    const m = normalizaNombre(p.cliente);
+    if(m !== n && (empiezaIgual(m, n) || empiezaIgual(n, m))) parecidos.push(p);
+  });
+  return {bloquea: prestamos.length > 0 || solicitudes.length > 0,
+          prestamos, solicitudes, parecidos};
+}
+
+/* El aviso debajo del nombre del cliente. */
+function avisoCliente(socioNombre, cliente){
+  const c = choqueCliente(socioNombre, cliente);
+  if(c.bloquea){
+    const p = c.prestamos[0];
+    const detalle = p
+      ? `el préstamo N° ${p.id}, con ${formatMoney(saldoConfirmado(p))} de saldo${
+          calcEstado(p) === 'Vencido' ? ', vencido el ' + p.vencimiento : ''}`
+      : `una solicitud pendiente de aprobación`;
+    return `<div class="notice warn"><b>No se puede pedir este préstamo.</b>
+      ${escapaHtml(cliente.trim())} ya tiene ${detalle} con ${escapaHtml(socioNombre)}.
+      Un cliente no puede tener dos préstamos activos con el mismo socio: hay que
+      cancelar el que está abierto antes de darle otro.</div>`;
+  }
+  if(c.parecidos.length){
+    const nombres = c.parecidos.map(p => `${escapaHtml(p.cliente)} (N° ${p.id})`).join(', ');
+    return `<div class="notice">¿Es la misma persona que <b>${nombres}</b>?
+      Ese préstamo sigue activo. Si es la misma, escribí el nombre igual que allá;
+      si son dos personas distintas, seguí.</div>`;
+  }
+  return '';
+}
+
 /* ---------- El aviso de disponibilidad dentro del formulario ----------
    Lo que el socio necesita saber ANTES de pedir: si hay plata en la bolsa del
    método que eligió, y cuánto de esa plata ya está apartado por las
@@ -4380,6 +4451,21 @@ function avisoDisponible(metodo, monto){
 
 /* Repinta solo el aviso: redibujar la pantalla entera borraría lo que la
    persona lleva escrito en el formulario. */
+function socioDelFormulario(){
+  const sel = document.getElementById('sol-socio');
+  return sel ? sel.value : STATE.socioActivo;
+}
+function refrescarAvisoCliente(){
+  const caja = document.getElementById('sol-cliente-aviso');
+  const inp = document.getElementById('sol-cliente');
+  if(!caja || !inp) return;
+  caja.innerHTML = avisoCliente(socioDelFormulario(), inp.value);
+  // Con el aviso rojo el botón de enviar no sirve de nada.
+  const form = inp.closest('form');
+  const btn = form ? form.querySelector('button[type="submit"]') : null;
+  if(btn) btn.disabled = choqueCliente(socioDelFormulario(), inp.value).bloquea;
+}
+
 function refrescarAvisoDisponible(){
   const caja = document.getElementById('sol-disponible');
   if(!caja) return;
@@ -4430,7 +4516,8 @@ function renderSolicitarPrestamo(esAdmin){
       </div>
       ${esPropioAdmin ? '<div class="notice warn">Este socio sos vos mismo. Requiere segunda revisión antes de aprobarla.</div>' : ''}
       ` : ''}
-      <div class="field"><label>Nombre del cliente</label><input type="text" name="cliente" required placeholder="Nombre completo"></div>
+      <div class="field"><label>Nombre del cliente</label><input type="text" name="cliente" id="sol-cliente" required placeholder="Nombre completo" autocomplete="off"></div>
+      <div id="sol-cliente-aviso"></div>
       <div class="grid cols-2">
         <div class="field"><label>Monto solicitado</label><input type="text" inputmode="numeric" class="money-input" name="monto" id="sol-monto" required placeholder="₡0"></div>
         <div class="field"><label>Plazo (meses)</label><input type="number" name="plazo" id="sol-plazo" min="1" step="1" required value="3"></div>
@@ -4527,7 +4614,26 @@ function avisoSolicitud(cola){
   }
   return '';
 }
+/* Entre que el socio pidió y el administrador aprueba, la misma persona pudo
+   haber recibido otro préstamo del mismo socio. Se vuelve a revisar aquí. */
+function avisoClienteSolicitud(s){
+  const c = choqueCliente(s.socio, s.cliente, s.id);
+  if(!c.prestamos.length && !c.solicitudes.length) return '';
+  const p = c.prestamos[0];
+  return `<div class="notice warn"><b>Ya tiene uno activo.</b>
+    ${escapaHtml(s.cliente)} ${p
+      ? `tiene el préstamo N° ${p.id} con ${formatMoney(saldoConfirmado(p))} de saldo`
+      : 'tiene otra solicitud pendiente'} con ${escapaHtml(s.socio)}.
+    Un cliente no puede tener dos préstamos activos con el mismo socio.</div>`;
+}
+
 function botonesSolicitud(s, cola){
+  const choque = choqueCliente(s.socio, s.cliente, s.id);
+  if(choque.prestamos.length || choque.solicitudes.length){
+    return `<button class="btn btn-ghost btn-sm" data-sol="${s.id}" disabled
+        title="Ese cliente ya tiene un préstamo activo con ese socio">Aprobar y crear préstamo</button>
+      <button class="btn btn-danger btn-sm" data-action="abrir-rechazo-solicitud" data-sol="${s.id}">Rechazar</button>`;
+  }
   return `${cola.alcanzaSolo
       ? `<button class="btn btn-primary btn-sm" data-action="aprobar-solicitud" data-sol="${s.id}">Aprobar y crear préstamo</button>`
       : `<button class="btn btn-ghost btn-sm" data-sol="${s.id}" disabled title="No hay fondos suficientes para desembolsar esta solicitud por ese método">Aprobar y crear préstamo</button>`}
@@ -4580,6 +4686,7 @@ function renderSolicitudesAdmin(){
         <div class="mov-top"><span>${s.cliente} · solicitado por ${s.socio}</span><span data-sol-pill="${s.id}">${pillSolicitud(cola)}</span></div>
         <div class="mov-meta">Solicitud N° ${cola.numero} en la fila de desembolso · Solicitado el ${s.fechaSolicitud}${s.nota? ' · Nota: '+s.nota:''}</div>
         <div data-sol-aviso="${s.id}">${avisoSolicitud(cola)}</div>
+        ${avisoClienteSolicitud(s)}
         ${formatDetalleMetodo(s.metodoDesembolso, s.detalleMetodo) ? `<div class="notice">${s.metodoDesembolso}: ${formatDetalleMetodo(s.metodoDesembolso, s.detalleMetodo)}</div>` : ''}
         <div class="grid cols-2" style="margin-top:8px;">
           <div class="field"><label>Monto</label><input type="text" inputmode="numeric" class="sol-monto money-input" data-sol="${s.id}" value="${moneyInputValue(s.monto)}"></div>
@@ -6157,6 +6264,18 @@ document.addEventListener('click', async function(e){
   }
   if(action==='aprobar-solicitud'){
     const solId = t.dataset.sol;
+    const sol = solicitudPorId(solId);
+    if(sol){
+      const ch = choqueCliente(sol.socio, sol.cliente, sol.id);
+      if(ch.prestamos.length || ch.solicitudes.length){
+        const p = ch.prestamos[0];
+        toast(p
+          ? `${sol.cliente} ya tiene el préstamo N° ${p.id} activo con ${sol.socio}.`
+          : `${sol.cliente} ya tiene otra solicitud pendiente con ${sol.socio}.`);
+        render();
+        return;
+      }
+    }
     const monto = parseMoneyInputValue(document.querySelector(`.sol-monto[data-sol="${solId}"]`).value);
     const plazo = Number(document.querySelector(`.sol-plazo[data-sol="${solId}"]`).value);
     const intereses = parseMoneyInputValue(document.querySelector(`.sol-interes[data-sol="${solId}"]`).value);
@@ -6373,7 +6492,13 @@ document.addEventListener('change', function(e){
     return;
   }
   if(e.target.id==='reg-socio'){ STATE.screenParams = {...STATE.screenParams, socioSel:e.target.value}; render(); return; }
-  if(e.target.id==='sol-socio'){ STATE.screenParams = {...STATE.screenParams, socioSolSel:e.target.value}; render(); return; }
+  if(e.target.id==='sol-socio'){
+    STATE.screenParams = {...STATE.screenParams, socioSolSel:e.target.value};
+    render();
+    // La regla es por socio: con otro socio el mismo nombre puede estar bien.
+    refrescarAvisoCliente();
+    return;
+  }
   if(e.target.classList.contains('sol-metodo')){ refrescarFondosSolicitudes(); return; }
   if(e.target.id==='sol-metodo-desembolso'){
     document.getElementById('sol-metodo-detalle').innerHTML = renderSolMetodoDetalle(e.target.value);
@@ -6561,6 +6686,7 @@ document.addEventListener('input', function(e){
     formatMoneyInputLive(e.target);
   }
   if(e.target.classList.contains('sol-monto')){ refrescarFondosSolicitudes(); return; }
+  if(e.target.id==='sol-cliente'){ refrescarAvisoCliente(); }
   if(e.target.id==='sol-monto'){ refrescarAvisoDisponible(); }
   if(e.target.id==='sol-monto' || e.target.id==='sol-plazo'){
     const monto = parseMoneyInputValue(document.getElementById('sol-monto').value);
@@ -6705,6 +6831,17 @@ document.addEventListener('submit', async function(e){
     const aNombreDe = comoAdmin
       ? (document.getElementById('sol-socio') || {}).value || SEED.socios[0].nombre
       : STATE.socioActivo;
+    /* El candado de verdad va aquí y no solo en el aviso de la pantalla: el
+       aviso se puede esquivar pegando el nombre sin escribirlo. */
+    const choque = choqueCliente(aNombreDe, cliente);
+    if(choque.bloquea){
+      refrescarAvisoCliente();
+      const p = choque.prestamos[0];
+      toast(p
+        ? `${cliente} ya tiene el préstamo N° ${p.id} activo con ${aNombreDe}.`
+        : `${cliente} ya tiene una solicitud pendiente con ${aNombreDe}.`);
+      return;
+    }
     await crearSolicitud({socio:aNombreDe, cliente, monto, plazo, metodoDesembolso:metodo, nota, detalleMetodo});
     toast(comoAdmin
       ? 'Solicitud creada a nombre de ' + aNombreDe + '. Falta aprobarla.'
