@@ -518,7 +518,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '5.9';
+const APP_VERSION = '6.0';
 /* El enlace de recuperacion trae su llave en el hash de la direccion, y
    supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
 const HASH_INICIAL = location.hash || '';
@@ -1607,6 +1607,7 @@ async function aprobarSolicitud(id, {monto, plazo, intereses, metodo, fechaDesem
   if(eS){ toast(mensajeDeErrorSb(eS)); return null; }
 
   await cargarTodo();
+  STATE.modal = {type:'desembolso', prestamoId: nuevoId};
   toast('Préstamo N° ' + nuevoId + ' creado y agregado a la tabla de Préstamos.');
   return true;
 }
@@ -1981,6 +1982,93 @@ function dibujarReversa(rev, original, recibo, pageH){
   c.texto('Este documento deja sin efecto el abono descrito', 7, 'F1', margen); c.bajar(9);
   c.texto('y anula el recibo indicado.', 7, 'F1', margen);
   return c;
+}
+
+/* ---------------------------------------------------------------------------
+   Comprobante de entrega del préstamo.
+
+   El papel que se le manda al cliente cuando se le desembolsa, junto con el
+   comprobante de la transferencia. Hasta ahora no existía: quedaba constancia
+   de cada abono, pero no de la entrega, que es justo lo que el cliente quiere
+   tener guardado.
+
+   No es un contrato ni un pagaré: es el comprobante de lo que se entregó y de
+   lo que queda debiendo, con las condiciones por escrito para que nadie las
+   recuerde distinto dentro de tres meses.
+--------------------------------------------------------------------------- */
+function solicitudDePrestamo(prestamoId){
+  return SOLICITUDES.find(x => x.prestamoIdAsignado && mismoId(x.prestamoIdAsignado, prestamoId)) || null;
+}
+
+function construirPdfDesembolso(p, reimpresion){
+  return unaSolaHoja(alto => dibujarDesembolso(p, reimpresion, alto), 520);
+}
+function dibujarDesembolso(p, reimpresion, pageH){
+  const pageW = 300, margen = 30;
+  const c = pdfLienzo(pageW, pageH, margen);
+  const sol = solicitudDePrestamo(p.id);
+  const total = totalAPagar(p);
+  const porMes = p.plazo > 0 ? Math.round(p.intereses / p.plazo) : 0;
+
+  c.logo(26); c.bajar(40);
+  if(reimpresion){ c.texto('REIMPRESION', 10, 'F2', margen); c.bajar(14); }
+  c.texto('Comprobante de entrega de prestamo', 10, 'F2', margen); c.bajar(11);
+  c.texto(`N ${p.id}`, 9, 'F1', margen); c.bajar(10);
+  c.linea(); c.bajar(18);
+
+  [
+    ['Fecha de entrega', p.fecha],
+    ['Cliente', p.cliente],
+    ['Monto entregado', pdfMoney(p.monto)],
+    ['Metodo', p.metodoDesembolso]
+  ].forEach(([k,v]) => { c.fila(k, v); c.bajar(18); });
+
+  // A que cuenta o a que numero se mando: lo que el cliente va a querer cotejar.
+  const detalle = sol ? formatDetalleMetodo(sol.metodoDesembolso, sol.detalleMetodo) : '';
+  if(detalle){
+    pdfEnvolver(detalle, pageW - margen*2, 8).forEach(l => {
+      c.texto(l, 8, 'F1', margen); c.bajar(10);
+    });
+    c.bajar(6);
+  }
+
+  c.bajar(4); c.linea(); c.bajar(16);
+  c.texto('Lo que queda debiendo', 9, 'F2', margen); c.bajar(16);
+  [
+    ['Plazo', `${p.plazo} ${p.plazo === 1 ? 'mes' : 'meses'}`],
+    ['Intereses pactados', pdfMoney(p.intereses)
+      + (porMes > 0 ? ` (${pdfMoney(porMes)} por mes)` : '')],
+    ['TOTAL A PAGAR', pdfMoney(total)],
+    ['Fecha de vencimiento', p.vencimiento]
+  ].forEach(([k,v]) => { c.fila(k, v, k === 'TOTAL A PAGAR' ? 11 : 10); c.bajar(18); });
+
+  c.bajar(2); c.linea(); c.bajar(16);
+  c.texto('Como se paga', 9, 'F2', margen); c.bajar(13);
+  pdfEnvolver('Se puede abonar cuando se quiera y por el monto que se pueda, '
+    + 'hasta completar el total antes de la fecha de vencimiento. Cada abono '
+    + 'lleva su recibo.', pageW - margen*2, 8)
+    .forEach(l => { c.texto(l, 8, 'F1', margen); c.bajar(10); });
+  c.bajar(4);
+  pdfEnvolver(`Si pasa la fecha de vencimiento sin terminar de pagar, se cobra `
+    + `${CONFIG.tasaMensual}% mensual de mora sobre el saldo que quede, por cada mes `
+    + `cumplido de atraso.`, pageW - margen*2, 8)
+    .forEach(l => { c.texto(l, 8, 'F1', margen); c.bajar(10); });
+
+  c.firmas('Entregado por (Lazos)', 'Recibi conforme, el cliente');
+
+  c.bajar(24);
+  c.texto('Socio responsable: ' + p.socio, 7, 'F1', margen);
+  return c;
+}
+
+function abrirPdfDesembolso(prestamoId, reimpresion){
+  const p = prestamoById(prestamoId);
+  if(!p) return;
+  return entregarPdf(
+    () => construirPdfDesembolso(p, reimpresion),
+    'Entrega_prestamo_' + p.id + (reimpresion ? '_reimpresion' : '') + '.pdf',
+    'comprobante de entrega del prestamo ' + p.id
+  );
 }
 
 function nombreClientePorPrestamo(prestamoId){
@@ -3982,6 +4070,8 @@ function renderDetalle(id, esAdmin){
       ${pillEstado(estado)}
     </div>
     ${estado!=='Cancelado' ? `<button class="btn btn-accent btn-block no-print" style="margin:12px 0;" data-action="goto" data-screen="${esAdmin?'registrarSocio':'registrar'}" data-preselect="${p.id}">➕ Registrar abono para este préstamo</button>` : ''}
+    <button class="btn btn-ghost btn-sm no-print" style="margin-bottom:10px;"
+      data-action="pdf-desembolso" data-prestamo="${p.id}" data-reimpresion="1">Comprobante de entrega (PDF)</button>
     <div class="kv"><span class="k">Saldo confirmado</span><span class="v" style="color:var(--danger)">${formatMoney(saldo)}</span></div>
     <div class="kv"><span class="k">Total a pagar</span><span class="v">${formatMoney(totalAPagar(p))}</span></div>
     ${totalOtrosCargos(p.id) ? `<div class="kv"><span class="k">Otros cobros</span><span class="v">${formatMoney(totalOtrosCargos(p.id))}</span></div>` : ''}
@@ -6040,6 +6130,7 @@ function renderModal(){
   if(!STATE.modal) return '';
   const m = STATE.modal;
   if(m.type==='recibo') return renderReciboModal(m.recibo);
+  if(m.type==='desembolso') return renderDesembolsoModal(m.prestamoId);
   if(m.type==='cierre') return renderCierreModal(m.cierre);
   if(m.type==='rechazo') return renderMotivoModal('Rechazar abono', 'rechazar', m.movId);
   if(m.type==='reversa') return renderMotivoModal('Reversar abono', 'reversar', m.movId);
@@ -6138,6 +6229,31 @@ function renderMotivoModal(titulo, accion, refId){
     </div>
   </div>`;
 }
+/* Al aprobar una solicitud, el papel para mandarle al cliente junto con el
+   comprobante de la transferencia. Sale solo, porque es el momento en que hay
+   que mandarlo: si hubiera que ir a buscarlo despues, no se manda. */
+function renderDesembolsoModal(prestamoId){
+  const p = prestamoById(prestamoId);
+  if(!p) return '';
+  const sol = solicitudDePrestamo(p.id);
+  const detalle = sol ? formatDetalleMetodo(sol.metodoDesembolso, sol.detalleMetodo) : '';
+  return `<div class="overlay" data-action="cerrar-modal-bg">
+    <div class="modal">
+      <div class="modal-head"><h3>Préstamo N° ${p.id} creado</h3><button class="close-x" data-action="cerrar-modal">✕</button></div>
+      <p class="muted" style="margin-top:0;">Mandale al cliente este comprobante junto con el comprobante de la transferencia.</p>
+      <div class="kv"><span class="k">Cliente</span><span class="v">${escapaHtml(p.cliente)}</span></div>
+      <div class="kv"><span class="k">Se le entregó</span><span class="v">${formatMoney(p.monto)}</span></div>
+      <div class="kv"><span class="k">Método</span><span class="v">${escapaHtml(p.metodoDesembolso)}</span></div>
+      ${detalle ? `<div class="kv"><span class="k"></span><span class="v muted" style="font-weight:400;">${escapaHtml(detalle)}</span></div>` : ''}
+      <div class="kv"><span class="k">Total a pagar</span><span class="v">${formatMoney(totalAPagar(p))}</span></div>
+      <div class="kv"><span class="k">Vence el</span><span class="v">${p.vencimiento}</span></div>
+      <div style="display:flex; gap:8px; margin-top:12px;" class="no-print">
+        <button class="btn btn-primary btn-block" data-action="pdf-desembolso" data-prestamo="${p.id}" data-reimpresion="0">Guardar el comprobante (PDF)</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderReciboModal(r){
   return `<div class="overlay" data-action="cerrar-modal-bg">
     <div class="modal">
@@ -6245,6 +6361,7 @@ document.addEventListener('click', async function(e){
     STATE.cortePrevia = false; STATE.corteNota = '';
     render(); return;
   }
+  if(action==='pdf-desembolso'){ abrirPdfDesembolso(t.dataset.prestamo, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-recibo'){ abrirPdfRecibo(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-cierre'){ abrirPdfCierre(t.dataset.numero, t.dataset.reimpresion==='1'); return; }
   if(action==='pdf-reversa'){ abrirPdfReversa(t.dataset.mov); return; }
