@@ -518,7 +518,10 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '5.8';
+const APP_VERSION = '5.9';
+/* El enlace de recuperacion trae su llave en el hash de la direccion, y
+   supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
+const HASH_INICIAL = location.hash || '';
 /* Quién puede entrar y con qué rol. Solo lo carga el administrador: la
    función estado_accesos() no le devuelve nada a nadie más. */
 const ACCESOS = [];
@@ -586,7 +589,8 @@ const STATE = {
   historialHasta: '',
   modal: null,
   theme: null,
-  pantallaEntrada: 'login',  // 'login' | 'registro', antes de tener sesion
+  // 'login' | 'registro' | 'recuperar' | 'nueva-clave', antes de tener sesion
+  pantallaEntrada: 'login',
   // Por qué columna está ordenada cada tabla: {prestamos:{col,dir}, ...}
   orden: {},
   recibosBusqueda: '', recibosDesde: '', recibosHasta: ''
@@ -2105,7 +2109,18 @@ const GUIA_PASOS = [
       'En "Contraseña nueva" poné la clave que vos querás, de ocho caracteres o más, y repetila abajo.',
       'Tocá "Crear mi contraseña". Entrás de una vez.'
     ],
-    aviso:'Nadie más conoce tu contraseña, ni la administración. Si se te olvida, avisale a la administración: un código nuevo no la cambia, hay que reponerte la cuenta.' },
+    aviso:'Nadie más conoce tu contraseña, ni la administración. Si se te olvida, la recuperás vos mismo: mirá el paso siguiente.' },
+
+  { titulo:'Si se te olvidó la contraseña',
+    intro:'La recuperás vos, sin pedirle nada a nadie. No hace falta un código nuevo.',
+    pasos:[
+      'En la pantalla de entrada tocá "Recuperá tu contraseña".',
+      'Escribí tu correo, el mismo con el que entrás, y tocá "Mandame el enlace".',
+      'Revisá tu correo. Si no lo ves, buscá en la carpeta de correo no deseado.',
+      'Abrí el enlace DESDE ESTE MISMO TELÉFONO.',
+      'Poné la contraseña nueva dos veces y tocá "Guardar y entrar".'
+    ],
+    aviso:'El enlace sirve una sola vez y vence a la hora. Si se te pasó, pedí otro: no hay límite. Si abrís el enlace en otro aparato, te va a cambiar la contraseña ahí, no aquí.' },
 
   { titulo:'Dejar la app en tu teléfono',
     intro:'Así entrás con un toque, sin buscar el enlace cada vez.',
@@ -3592,7 +3607,10 @@ async function reversarAbono(movId, motivo){
 function render(){
   const app = document.getElementById('app');
   if(!STATE.role){
-    app.innerHTML = STATE.pantallaEntrada === 'registro' ? renderRegistro() : renderLogin();
+    app.innerHTML = STATE.pantallaEntrada === 'registro'    ? renderRegistro()
+                  : STATE.pantallaEntrada === 'recuperar'   ? renderRecuperar()
+                  : STATE.pantallaEntrada === 'nueva-clave' ? renderNuevaClave()
+                  : renderLogin();
     attachFormRefs();
     return;
   }
@@ -3634,6 +3652,9 @@ function renderLogin(){
 
     <p class="login-nota">
       ¿Primera vez? <a href="#" data-action="ir-registro">Creá tu contraseña</a> con el código que te pasaron.
+    </p>
+    <p class="login-nota">
+      ¿Se te olvidó? <a href="#" data-action="ir-recuperar">Recuperá tu contraseña</a>.
     </p>
     ${renderPieLegal()}
   </div>`;
@@ -3679,6 +3700,73 @@ function renderRegistro(){
 
     <p class="login-nota">
       ¿Ya tenés cuenta? <a href="#" data-action="ir-login">Entrá por aquí</a>.
+    </p>
+    ${renderPieLegal()}
+  </div>`;
+}
+
+/* Pedir el enlace de recuperacion.
+
+   No dice si el correo existe o no, y a proposito: si dijera "ese correo no
+   tiene cuenta", cualquiera podria ir probando correos para averiguar quien
+   trabaja aqui. Contesta lo mismo en los dos casos. */
+function renderRecuperar(){
+  return `
+  <div class="login-wrap">
+    <div class="login-marca">
+      ${svgLogo(64)}
+      <div class="login-hoja"></div>
+      <div class="login-lema">Recuperá tu contraseña</div>
+    </div>
+
+    <div class="card login-card">
+      <div id="login-aviso" class="notice warn" style="display:none;"></div>
+      <p class="muted" style="margin-top:0;">Poné el correo con el que entrás a Lazos y te mandamos un enlace para elegir una contraseña nueva.</p>
+      <form id="form-recuperar">
+        <div class="field">
+          <label for="correo">Correo</label>
+          <input type="email" id="correo" autocomplete="username" inputmode="email" required placeholder="tu@correo.com">
+        </div>
+        <button type="submit" class="btn btn-primary btn-block" id="btn-recuperar">Mandame el enlace</button>
+      </form>
+    </div>
+
+    <p class="login-nota">
+      ¿Te acordaste? <a href="#" data-action="ir-login">Entrá por aquí</a>.
+    </p>
+    ${renderPieLegal()}
+  </div>`;
+}
+
+/* Donde cae el enlace del correo. El enlace ya abre sesion por su cuenta,
+   pero no se le deja pasar hasta que elija la contraseña nueva: si no,
+   entraria sin haberla cambiado y a la proxima volveria a quedar afuera. */
+function renderNuevaClave(){
+  return `
+  <div class="login-wrap">
+    <div class="login-marca">
+      ${svgLogo(64)}
+      <div class="login-hoja"></div>
+      <div class="login-lema">Elegí tu contraseña nueva</div>
+    </div>
+
+    <div class="card login-card">
+      <div id="login-aviso" class="notice warn" style="display:none;"></div>
+      <form id="form-nueva-clave">
+        <div class="field">
+          <label for="clave">Contraseña nueva</label>
+          <input type="password" id="clave" autocomplete="new-password" required minlength="8" placeholder="Al menos 8 caracteres">
+        </div>
+        <div class="field">
+          <label for="clave2">Repetila</label>
+          <input type="password" id="clave2" autocomplete="new-password" required minlength="8" placeholder="La misma de arriba">
+        </div>
+        <button type="submit" class="btn btn-primary btn-block" id="btn-nueva-clave">Guardar y entrar</button>
+      </form>
+    </div>
+
+    <p class="login-nota">
+      Si el enlace ya venció, <a href="#" data-action="ir-recuperar">pedí uno nuevo</a>.
     </p>
     ${renderPieLegal()}
   </div>`;
@@ -6206,6 +6294,7 @@ document.addEventListener('click', async function(e){
   }
   if(action==='ir-registro'){ e.preventDefault(); STATE.pantallaEntrada='registro'; avisoLogin(''); render(); return; }
   if(action==='ir-login'){ e.preventDefault(); STATE.pantallaEntrada='login'; avisoLogin(''); render(); return; }
+  if(action==='ir-recuperar'){ e.preventDefault(); STATE.pantallaEntrada='recuperar'; avisoLogin(''); render(); return; }
   if(action==='cambiar-rol-acceso'){ return; }
   if(action==='plegar-solicitud'){ STATE.solicitudAbierta = !STATE.solicitudAbierta; render(); return; }
   if(action==='copiar-lista-sin-abonar'){
@@ -6987,6 +7076,79 @@ function mensajeDeRegistro(error){
   return (error && error.message) ? error.message : 'No se pudo crear la cuenta.';
 }
 
+/* -------- recuperar: pedir el enlace -------- */
+document.addEventListener('submit', async function(e){
+  if(e.target.id !== 'form-recuperar') return;
+  e.preventDefault();
+  avisoLogin('');
+  const correo = document.getElementById('correo').value.trim().toLowerCase();
+  const btn = document.getElementById('btn-recuperar');
+  btn.disabled = true; btn.textContent = 'Mandando...';
+
+  /* El enlace tiene que volver a ESTA misma pagina. La direccion se arma con
+     lo que el navegador ya tiene abierto, sin el hash ni los parametros, para
+     que funcione igual en el telefono, en la compu y si algun dia la pagina
+     se muda de lugar. */
+  const volverA = location.origin + location.pathname;
+  const { error } = await sb.auth.resetPasswordForEmail(correo, {redirectTo: volverA});
+  btn.disabled = false; btn.textContent = 'Mandame el enlace';
+
+  if(error && /rate limit|too many/i.test(error.message || '')){
+    avisoLogin('Se pidieron muchos enlaces seguidos. Esperá unos minutos.');
+    return;
+  }
+  /* Se contesta lo mismo haya cuenta o no: decir "ese correo no existe"
+     serviria para ir averiguando quienes son los socios. */
+  const aviso = document.getElementById('login-aviso');
+  if(aviso){
+    aviso.className = 'notice';
+    aviso.style.display = 'block';
+    aviso.innerHTML = 'Si ese correo tiene cuenta en Lazos, ya te llegó un enlace. '
+      + 'Abrilo desde este mismo teléfono y elegí tu contraseña nueva. '
+      + '<b>Revisá también la bandeja de correo no deseado.</b>';
+  }
+});
+
+/* -------- recuperar: elegir la contraseña nueva -------- */
+document.addEventListener('submit', async function(e){
+  if(e.target.id !== 'form-nueva-clave') return;
+  e.preventDefault();
+  avisoLogin('');
+  const clave  = document.getElementById('clave').value;
+  const clave2 = document.getElementById('clave2').value;
+  if(clave !== clave2){ avisoLogin('Las dos contraseñas no son iguales.'); return; }
+  if(clave.length < 8){ avisoLogin('La contraseña necesita al menos 8 caracteres.'); return; }
+
+  const btn = document.getElementById('btn-nueva-clave');
+  btn.disabled = true; btn.textContent = 'Guardando...';
+  const { error } = await sb.auth.updateUser({password: clave});
+  btn.disabled = false; btn.textContent = 'Guardar y entrar';
+
+  if(error){ avisoLogin(mensajeDeClaveNueva(error)); return; }
+
+  // El enlace ya no sirve para nada: que no quede en la direccion.
+  try{ history.replaceState(null, '', location.pathname); }catch(err){}
+  const { data } = await sb.auth.getSession();
+  if(!data.session){
+    STATE.pantallaEntrada = 'login';
+    render();
+    avisoLogin('Contraseña cambiada. Entrá con la nueva.');
+    return;
+  }
+  STATE.pantallaEntrada = 'login';
+  await entrar(data.session);
+});
+
+function mensajeDeClaveNueva(error){
+  const m = (error && error.message ? error.message : String(error)).toLowerCase();
+  if(m.includes('session') || m.includes('expired') || m.includes('invalid'))
+    return 'El enlace ya venció o se usó. Pedí uno nuevo desde "Recuperá tu contraseña".';
+  if(m.includes('password')) return 'La contraseña es muy corta o muy simple. Probá con una más larga.';
+  if(m.includes('same')) return 'Esa es la contraseña que ya tenías. Poné una distinta.';
+  if(m.includes('failed to fetch')) return 'Sin conexión. Revisá tu internet.';
+  return (error && error.message) ? error.message : 'No se pudo cambiar la contraseña.';
+}
+
 /* El formulario se dibuja y se borra en cada render, asi que el envio se
    escucha en el documento en vez de en el formulario. */
 document.addEventListener('submit', async function(e){
@@ -7064,9 +7226,17 @@ async function entrar(sesion){
   // El enlace que recibe el socio trae ?registro: cae directo en la pantalla
   // de crear contraseña, sin tener que buscarla.
   if(location.search.includes('registro')) STATE.pantallaEntrada = 'registro';
+
+  /* El enlace de recuperacion abre sesion por si solo. Si lo dejaramos
+     pasar de largo, la persona entraria sin haber cambiado nada y a la
+     proxima volveria a quedarse afuera sin saber su contraseña. Asi que
+     primero se la pedimos. */
+  const recuperando = /type=recovery/.test(HASH_INICIAL);
+  if(recuperando) STATE.pantallaEntrada = 'nueva-clave';
+
   render();   // pinta el login mientras se revisa si hay sesion guardada
   const { data } = await sb.auth.getSession();
-  if(data.session) await entrar(data.session);
+  if(data.session && !recuperando) await entrar(data.session);
 })();
 </script>
 </body>
