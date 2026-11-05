@@ -336,6 +336,12 @@ main{padding:16px 0 40px;}
 table{border-collapse:collapse; width:100%; font-size:13px; min-width:760px;}
 th,td{padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap;}
 th{background:var(--bg-alt); position:sticky; top:0; font-size:12px; text-transform:uppercase; letter-spacing:0.3px; color:var(--text-muted);}
+.fila-filtros th{top:31px; padding:4px 6px; text-transform:none; letter-spacing:0;}
+.fila-filtros input, .fila-filtros select{width:100%; min-width:84px; padding:4px 6px;
+  font-size:12px; border:1.5px solid var(--border); border-radius:var(--radius-sm);
+  background:var(--bg); color:var(--text); font-family:inherit; min-height:0;}
+.cuenta-tabla{font-size:12.5px; color:var(--text-muted); margin:0 0 6px;
+  display:flex; align-items:center; gap:4px; flex-wrap:wrap;}
 tr:hover td{background:var(--bg-alt);}
 /* forms */
 .field{display:flex; flex-direction:column; gap:5px; margin-bottom:12px;}
@@ -518,7 +524,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '6.0';
+const APP_VERSION = '6.1';
 /* El enlace de recuperacion trae su llave en el hash de la direccion, y
    supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
 const HASH_INICIAL = location.hash || '';
@@ -593,6 +599,8 @@ const STATE = {
   pantallaEntrada: 'login',
   // Por qué columna está ordenada cada tabla: {prestamos:{col,dir}, ...}
   orden: {},
+  // Qué filtro tiene puesto cada columna: {prestamos:{estado:'Vigente'}, ...}
+  filtros: {},
   recibosBusqueda: '', recibosDesde: '', recibosHasta: ''
 };
 
@@ -5203,7 +5211,7 @@ function renderTablero(){
     <h3>Por socio responsable</h3>
     <div class="table-wrap"><table>
       <thead><tr><th>Socio</th><th>Préstamos</th><th>Capital prestado (no cancelados)</th><th>Saldo por cobrar</th></tr></thead>
-      <tbody>${porSocio.map(s=>`<tr><td>${s.socio}</td><td>${s.prestamos}</td><td>${formatMoney(s.capital)}</td><td>${formatMoney(s.saldo)}</td></tr>`).join('')}</tbody>
+      <tbody>${porSocio.map(s=>`<tr style="cursor:pointer" data-action="prestamos-del-socio" data-socio="${escapaHtml(s.socio)}" title="Ver los préstamos de ${escapaHtml(s.socio)}"><td>${s.socio}</td><td>${s.prestamos}</td><td>${formatMoney(s.capital)}</td><td>${formatMoney(s.saldo)}</td></tr>`).join('')}</tbody>
     </table></div>
   </div>`;
 }
@@ -5374,6 +5382,16 @@ function valorOrdenable(col, fila){
   return String(v == null ? '' : v).toLowerCase();
 }
 
+/* El numero de prestamo es texto, no numero: puede ser "101" o podria ser
+   "101-B". Comparado como texto, el 100 queda pegado al 1 y al 10, que es
+   justo lo que nadie espera al ordenar una columna de numeros.
+
+   El Collator con numeric lee los numeros que hay dentro del texto y los
+   compara como numeros: 1, 9, 10, 100. Sirve igual para los consecutivos
+   con letra adelante (R-000009 antes que R-000010) y deja los nombres en
+   orden alfabetico de siempre, con las tildes donde corresponde. */
+const COMPARADOR_NATURAL = new Intl.Collator('es', {numeric:true, sensitivity:'base'});
+
 function ordenarFilas(filas, columnas, tabla){
   const o = ordenDe(tabla);
   if(!o) return filas;
@@ -5383,16 +5401,127 @@ function ordenarFilas(filas, columnas, tabla){
   // Copia: ordenar en su lugar cambiaría el arreglo de datos de la aplicación.
   return filas.slice().sort((a,b) => {
     const va = valorOrdenable(col, a), vb = valorOrdenable(col, b);
-    if(va < vb) return -1 * signo;
-    if(va > vb) return  1 * signo;
-    return 0;
+    /* Con restas, dos fechas vacias dan -Infinity menos -Infinity, que es NaN,
+       y un comparador que devuelve NaN deja la tabla en cualquier orden. */
+    const d = (typeof va === 'number' && typeof vb === 'number')
+      ? (va === vb ? 0 : va < vb ? -1 : 1)
+      : COMPARADOR_NATURAL.compare(String(va), String(vb));
+    return d * signo;
   });
+}
+
+/* ---------- Filtros por columna ----------
+   El valor con el que se filtra es el de los datos, no el que se ve pintado:
+   la columna Estado muestra una pastilla de color, pero por dentro dice
+   "Cancelado", y eso es lo que hay que poder esconder.
+
+   Las columnas con pocos valores distintos -estado, socio, metodo- salen como
+   lista para escoger; las demas, como casilla donde se escribe un pedazo. Las
+   de plata y fecha no llevan filtro: ahi lo que sirve es ordenar. */
+const FILTRO_LISTA_MAX = 15;
+
+function valorFiltrable(col, fila){
+  const v = col.val ? col.val(fila) : fila[col.k];
+  return v == null ? '' : String(v);
+}
+function filtroDe(tabla, col){
+  return (STATE.filtros[tabla] || {})[col] || '';
+}
+function hayFiltros(tabla){
+  return Object.values(STATE.filtros[tabla] || {}).some(v => v !== '');
+}
+function filtrarFilas(filas, columnas, tabla){
+  const f = STATE.filtros[tabla];
+  if(!f) return filas;
+  const activos = columnas.filter(c => (f[c.k] || '') !== '');
+  if(!activos.length) return filas;
+  return filas.filter(fila => activos.every(c => {
+    const valor = valorFiltrable(c, fila).toLowerCase();
+    let buscado = String(f[c.k]).toLowerCase();
+    /* Un "!" adelante quiere decir "todo menos esto". Es lo que hace falta
+       para esconder los cancelados sin esconder de paso los vencidos. */
+    if(buscado.startsWith('!')) return valor !== buscado.slice(1);
+    // La lista pide el valor exacto; la casilla, que lo contenga.
+    return c.__lista ? valor === buscado : valor.includes(buscado);
+  }));
+}
+/* Si una columna tiene pocos valores distintos, se ofrecen en una lista. */
+function opcionesDeColumna(col, filas){
+  if(col.tipo === 'num' || col.tipo === 'fecha') return null;
+  const vistos = [];
+  for(const f of filas){
+    const v = valorFiltrable(col, f);
+    if(v !== '' && !vistos.includes(v)) vistos.push(v);
+    if(vistos.length > FILTRO_LISTA_MAX) return null;
+  }
+  // Con un solo valor la lista no sirve de mucho, pero se deja igual: que el
+  // filtro cambie de forma segun cuantos datos haya confunde mas de lo que ayuda.
+  return vistos.length ? vistos.sort((a,b) => COMPARADOR_NATURAL.compare(a,b)) : null;
+}
+
+/* Lo que hay dibujado ahora mismo en cada tabla, para poder rehacer solo el
+   cuerpo cuando alguien escribe en un filtro, sin repintar la pantalla
+   entera: repintarla le quitaria el cursor de encima a la casilla. */
+const TABLAS_PINTADAS = {};
+
+function cuerpoTabla(tabla){
+  const t = TABLAS_PINTADAS[tabla];
+  if(!t) return '';
+  const filas = ordenarFilas(filtrarFilas(t.filas, t.columnas, tabla), t.columnas, tabla);
+  if(!filas.length){
+    return `<tr><td colspan="${t.columnas.length}" class="muted" style="text-align:center; padding:18px;">
+      Ninguna fila pasa el filtro.</td></tr>`;
+  }
+  return filas.map(f => {
+    const attrs = t.opciones.filaAttrs ? t.opciones.filaAttrs(f) : '';
+    return `<tr ${attrs}>${t.columnas.map(c => `<td>${c.html ? c.html(f) : (f[c.k] == null ? '' : f[c.k])}</td>`).join('')}</tr>`;
+  }).join('');
+}
+/* El boton de quitar los filtros NO se vuelve a dibujar aqui: se esconde y se
+   muestra. Dibujarlo de nuevo lo destruia justo cuando alguien lo iba a
+   tocar -al salir de una casilla de filtro salta su evento de cambio, que
+   repinta esto- y el toque se perdia en el aire. */
+/* Lo llaman los dos eventos, escribir y cambiar. Si el valor es el mismo que
+   ya estaba, no se repinta nada: repintar de gusto es lo que hacia perder el
+   toque en el boton de al lado. */
+function anotarFiltro(el){
+  const tabla = el.dataset.tabla, col = el.dataset.col;
+  STATE.filtros[tabla] = STATE.filtros[tabla] || {};
+  if(STATE.filtros[tabla][col] === el.value) return;
+  STATE.filtros[tabla][col] = el.value;
+  refrescarTabla(tabla);
+}
+
+function refrescarTabla(tabla){
+  const cuerpo = document.getElementById('cuerpo-' + tabla);
+  if(cuerpo) cuerpo.innerHTML = cuerpoTabla(tabla);
+  const cuenta = document.getElementById('cuenta-' + tabla);
+  if(cuenta) cuenta.innerHTML = textoCuenta(tabla);
+  const btn = document.getElementById('limpiar-' + tabla);
+  if(btn) btn.style.display = hayFiltros(tabla) ? '' : 'none';
+}
+function textoCuenta(tabla){
+  const t = TABLAS_PINTADAS[tabla];
+  if(!t) return '';
+  const total = t.filas.length;
+  if(!hayFiltros(tabla)) return `${total} ${total === 1 ? 'fila' : 'filas'}`;
+  const quedan = filtrarFilas(t.filas, t.columnas, tabla).length;
+  return `Mostrando <b>${quedan}</b> de ${total}`;
 }
 
 function renderTablaOrdenable(tabla, columnas, filas, opciones){
   opciones = opciones || {};
   const o = ordenDe(tabla);
-  const ordenadas = ordenarFilas(filas, columnas, tabla);
+  // Se marca cuales columnas van con lista, para que el filtro sepa si el
+  // valor tiene que ser exacto o basta con que lo contenga.
+  const listas = {};
+  columnas.forEach(c => {
+    if(c.ordenable === false){ c.__lista = null; return; }
+    const op = opcionesDeColumna(c, filas);
+    c.__lista = op;
+    listas[c.k] = op;
+  });
+  TABLAS_PINTADAS[tabla] = {columnas, filas, opciones};
 
   const encabezados = columnas.map(c => {
     if(c.ordenable === false) return `<th>${c.t}</th>`;
@@ -5401,14 +5530,35 @@ function renderTablaOrdenable(tabla, columnas, filas, opciones){
     return `<th class="th-orden${activa ? ' activa' : ''}" data-action="ordenar" data-tabla="${tabla}" data-col="${c.k}" title="Tocá para ordenar por ${c.t}">${c.t}${flecha}</th>`;
   }).join('');
 
-  const cuerpo = ordenadas.map(f => {
-    const attrs = opciones.filaAttrs ? opciones.filaAttrs(f) : '';
-    return `<tr ${attrs}>${columnas.map(c => `<td>${c.html ? c.html(f) : (f[c.k] == null ? '' : f[c.k])}</td>`).join('')}</tr>`;
+  const filtros = columnas.map(c => {
+    if(c.ordenable === false || (c.tipo === 'num' || c.tipo === 'fecha'))
+      return '<th class="th-filtro"></th>';
+    const puesto = escapaHtml(filtroDe(tabla, c.k));
+    if(listas[c.k]){
+      // Donde hay cancelados, la opcion que de verdad se usa a diario:
+      // verlo todo menos lo que ya se cobro.
+      const sinCancelados = listas[c.k].includes('Cancelado')
+        ? `<option value="!Cancelado"${filtroDe(tabla, c.k) === '!Cancelado' ? ' selected' : ''}>Sin cancelados</option>`
+        : '';
+      return `<th class="th-filtro"><select class="filtro-tabla" data-tabla="${tabla}" data-col="${c.k}">
+        <option value="">Todos</option>
+        ${sinCancelados}
+        ${listas[c.k].map(v => `<option value="${escapaHtml(v)}"${v === filtroDe(tabla, c.k) ? ' selected' : ''}>${escapaHtml(v)}</option>`).join('')}
+      </select></th>`;
+    }
+    return `<th class="th-filtro"><input type="text" class="filtro-tabla" data-tabla="${tabla}" data-col="${c.k}"
+      value="${puesto}" placeholder="Filtrar" autocomplete="off"></th>`;
   }).join('');
 
-  return `<div class="table-wrap"><table>
-    <thead><tr>${encabezados}</tr></thead>
-    <tbody>${cuerpo}</tbody></table></div>`;
+  return `<div class="cuenta-tabla no-print">
+    <span id="cuenta-${tabla}">${textoCuenta(tabla)}</span>
+    <button class="btn btn-ghost btn-sm" id="limpiar-${tabla}"
+      style="${hayFiltros(tabla) ? '' : 'display:none;'}"
+      data-action="limpiar-filtros-tabla" data-tabla="${tabla}">Quitar los filtros</button>
+  </div>
+  <div class="table-wrap"><table>
+    <thead><tr>${encabezados}</tr><tr class="fila-filtros no-print">${filtros}</tr></thead>
+    <tbody id="cuerpo-${tabla}">${cuerpoTabla(tabla)}</tbody></table></div>`;
 }
 
 function renderTablaBitacora(){
@@ -5690,7 +5840,7 @@ function renderTablaResumen(){
     <h3 style="margin-top:16px;">Por socio responsable</h3>
     <div class="table-wrap"><table>
       <thead><tr><th>Socio</th><th>Préstamos</th><th>Capital prestado (no cancelados)</th><th>Saldo por cobrar</th></tr></thead>
-      <tbody>${porSocio.map(s=>`<tr><td>${s.socio}</td><td>${s.prestamos}</td><td>${formatMoney(s.capital)}</td><td>${formatMoney(s.saldo)}</td></tr>`).join('')}</tbody>
+      <tbody>${porSocio.map(s=>`<tr style="cursor:pointer" data-action="prestamos-del-socio" data-socio="${escapaHtml(s.socio)}" title="Ver los préstamos de ${escapaHtml(s.socio)}"><td>${s.socio}</td><td>${s.prestamos}</td><td>${formatMoney(s.capital)}</td><td>${formatMoney(s.saldo)}</td></tr>`).join('')}</tbody>
     </table></div>`;
 }
 
@@ -6372,6 +6522,19 @@ document.addEventListener('click', async function(e){
     render();
     return;
   }
+  /* Desde el tablero: tocar un socio lleva a su cartera, sin los cancelados,
+     que es lo que uno quiere ver cuando se pregunta "¿que tiene afuera?". */
+  if(action==='prestamos-del-socio'){
+    STATE.filtros.prestamos = {socio: t.dataset.socio, estado: '!Cancelado'};
+    STATE.orden.prestamos = {col:'id', dir:'desc'};
+    goto('tablas', {tabla:'prestamos'});
+    return;
+  }
+  if(action==='limpiar-filtros-tabla'){
+    STATE.filtros[t.dataset.tabla] = {};
+    render();
+    return;
+  }
   if(action==='ordenar'){
     // Primer toque ordena de mayor a menor, que para montos y fechas es lo
     // que uno quiere ver primero. El segundo invierte. El tercero lo quita.
@@ -6678,6 +6841,12 @@ document.addEventListener('click', async function(e){
 });
 
 document.addEventListener('change', function(e){
+  // Las listas de los filtros: no todos los navegadores les dan 'input'.
+  // Las listas de los filtros: no todos los navegadores les dan 'input'.
+  if(e.target.classList.contains('filtro-tabla')){
+    anotarFiltro(e.target);
+    return;
+  }
   if(e.target.classList.contains('caja-check')){ actualizarTotalesCaja(); return; }
 
   // La fecha real de pago cambia cuántos meses de interés se cobran.
@@ -6959,6 +7128,7 @@ document.addEventListener('input', function(e){
     if(caja) caja.innerHTML = renderTablaRecibosCuerpo();
     return;
   }
+  if(e.target.classList.contains('filtro-tabla')){ anotarFiltro(e.target); return; }
   if(e.target.id==='buscar-cartera'){
     STATE.busquedaCartera = e.target.value;
     const list = document.getElementById('cartera-list');
