@@ -524,7 +524,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '6.1';
+const APP_VERSION = '6.2';
 /* El enlace de recuperacion trae su llave en el hash de la direccion, y
    supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
 const HASH_INICIAL = location.hash || '';
@@ -2052,15 +2052,33 @@ function dibujarDesembolso(p, reimpresion, pageH){
 
   c.bajar(2); c.linea(); c.bajar(16);
   c.texto('Como se paga', 9, 'F2', margen); c.bajar(13);
-  pdfEnvolver('Se puede abonar cuando se quiera y por el monto que se pueda, '
-    + 'hasta completar el total antes de la fecha de vencimiento. Cada abono '
-    + 'lleva su recibo.', pageW - margen*2, 8)
-    .forEach(l => { c.texto(l, 8, 'F1', margen); c.bajar(10); });
-  c.bajar(4);
-  pdfEnvolver(`Si pasa la fecha de vencimiento sin terminar de pagar, se cobra `
+
+  const parrafo = txt => {
+    pdfEnvolver(txt, pageW - margen*2, 8)
+      .forEach(l => { c.texto(l, 8, 'F1', margen); c.bajar(10); });
+    c.bajar(4);
+  };
+
+  /* La quincena sugerida es una guia para que el cliente sepa a que ritmo
+     tiene que ir, no una cuota fija: aqui se abona cuando se puede y por lo
+     que se puede. Se redondea a los cien mas cercanos y la ultima queda por
+     lo que sobre, que es como termina siempre en la practica. */
+  const quincenas = Math.round((p.plazo || 0) * 2);
+  if(quincenas >= 2){
+    const cuota = Math.round(total / quincenas / 100) * 100;
+    parrafo(`Para terminar dentro del plazo, la guia es abonar unos `
+      + `${pdfMoney(cuota)} cada quincena (${quincenas} quincenas en total), y la `
+      + `ultima por lo que quede.`);
+  }
+  parrafo('No es una cuota fija: puede abonar mas cuando le rinda, o menos '
+    + 'cuando no le alcance, mientras complete el total antes de la fecha de '
+    + 'vencimiento. Cada abono lleva su recibo.');
+  parrafo('Si puede pagarlo todo antes, pida el calculo de cancelacion '
+    + 'anticipada: se cobran solo los intereses de los meses corridos, asi que '
+    + 'termina pagando menos.');
+  parrafo(`Si pasa la fecha de vencimiento sin terminar de pagar, se cobra `
     + `${CONFIG.tasaMensual}% mensual de mora sobre el saldo que quede, por cada mes `
-    + `cumplido de atraso.`, pageW - margen*2, 8)
-    .forEach(l => { c.texto(l, 8, 'F1', margen); c.bajar(10); });
+    + `cumplido de atraso.`);
 
   c.firmas('Entregado por (Lazos)', 'Recibi conforme, el cliente');
 
