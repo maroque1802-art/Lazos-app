@@ -524,7 +524,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '6.2';
+const APP_VERSION = '6.3';
 /* El enlace de recuperacion trae su llave en el hash de la direccion, y
    supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
 const HASH_INICIAL = location.hash || '';
@@ -2070,9 +2070,9 @@ function dibujarDesembolso(p, reimpresion, pageH){
       + `${pdfMoney(cuota)} cada quincena (${quincenas} quincenas en total), y la `
       + `ultima por lo que quede.`);
   }
-  parrafo('No es una cuota fija: puede abonar mas cuando le rinda, o menos '
-    + 'cuando no le alcance, mientras complete el total antes de la fecha de '
-    + 'vencimiento. Cada abono lleva su recibo.');
+  parrafo('Puede abonar mas cuando le rinda, o menos cuando no le alcance, '
+    + 'mientras complete el total antes de la fecha de vencimiento. Cada abono '
+    + 'lleva su recibo.');
   parrafo('Si puede pagarlo todo antes, pida el calculo de cancelacion '
     + 'anticipada: se cobran solo los intereses de los meses corridos, asi que '
     + 'termina pagando menos.');
