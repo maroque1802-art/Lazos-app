@@ -524,7 +524,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '6.4';
+const APP_VERSION = '6.5';
 /* El enlace de recuperacion trae su llave en el hash de la direccion, y
    supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
 const HASH_INICIAL = location.hash || '';
@@ -1581,7 +1581,8 @@ async function crearSolicitud({socio, cliente, monto, plazo, metodoDesembolso, n
   });
   if(error){ toast(mensajeDeErrorSb(error)); return null; }
   await cargarTodo();
-  return true;
+  // Devuelve el numero para poder mostrarselo a quien la mando.
+  return id;
 }
 async function aprobarSolicitud(id, {monto, plazo, intereses, metodo, fechaDesembolso, comprobanteImg}){
   const sol = solicitudPorId(id);
@@ -6299,6 +6300,7 @@ function renderModal(){
   const m = STATE.modal;
   if(m.type==='recibo') return renderReciboModal(m.recibo);
   if(m.type==='desembolso') return renderDesembolsoModal(m.prestamoId);
+  if(m.type==='solicitud-enviada') return renderSolicitudEnviadaModal(m);
   if(m.type==='cierre') return renderCierreModal(m.cierre);
   if(m.type==='rechazo') return renderMotivoModal('Rechazar abono', 'rechazar', m.movId);
   if(m.type==='reversa') return renderMotivoModal('Reversar abono', 'reversar', m.movId);
@@ -6397,6 +6399,35 @@ function renderMotivoModal(titulo, accion, refId){
     </div>
   </div>`;
 }
+/* La confirmacion de que la solicitud quedo guardada.
+
+   Un aviso de dos segundos no alcanzaba: el socio acaba de tocar "Enviar" al
+   final de un formulario largo, la pantalla se repinta, el formulario queda
+   en blanco y la lista de sus solicitudes esta mas abajo, fuera de la
+   pantalla. Veia un formulario vacio y nada mas, y volvia a mandarla por las
+   dudas. Esto no se puede pasar por alto, y de paso contesta lo siguiente
+   que iba a preguntar: en que puesto de la fila quedo. */
+function renderSolicitudEnviadaModal(m){
+  const s = solicitudPorId(m.solId);
+  if(!s) return '';
+  return `<div class="overlay" data-action="cerrar-modal-bg">
+    <div class="modal">
+      <div class="modal-head"><h3>✅ Solicitud enviada</h3><button class="close-x" data-action="cerrar-modal">✕</button></div>
+      <p class="muted" style="margin-top:0;">${m.comoAdmin
+        ? 'Quedó guardada a nombre de ' + escapaHtml(m.socio) + '. Aprobarla es un paso aparte.'
+        : 'Quedó guardada. El administrador la revisa y te avisa.'}</p>
+      <div class="kv"><span class="k">N° de solicitud</span><span class="v">${escapaHtml(String(s.id))}</span></div>
+      <div class="kv"><span class="k">Cliente</span><span class="v">${escapaHtml(s.cliente)}</span></div>
+      <div class="kv"><span class="k">Monto</span><span class="v">${formatMoney(s.monto)}</span></div>
+      <div class="kv"><span class="k">Plazo</span><span class="v">${s.plazo} ${s.plazo === 1 ? 'mes' : 'meses'}</span></div>
+      <div class="kv"><span class="k">Interés propuesto</span><span class="v">${formatMoney(s.interesPropuesto)}</span></div>
+      <div class="kv"><span class="k">Desembolso</span><span class="v">${escapaHtml(s.metodoDesembolso)}</span></div>
+      ${lugarEnFila(s.id)}
+      <button class="btn btn-primary btn-block no-print" style="margin-top:12px;" data-action="cerrar-modal">Entendido</button>
+    </div>
+  </div>`;
+}
+
 /* Al aprobar una solicitud, el papel para mandarle al cliente junto con el
    comprobante de la transferencia. Sale solo, porque es el momento en que hay
    que mandarlo: si hubiera que ir a buscarlo despues, no se manda. */
@@ -7236,7 +7267,22 @@ document.addEventListener('submit', async function(e){
         : `${cliente} ya tiene una solicitud pendiente con ${aNombreDe}.`);
       return;
     }
-    await crearSolicitud({socio:aNombreDe, cliente, monto, plazo, metodoDesembolso:metodo, nota, detalleMetodo});
+    /* Mientras guarda, el boton lo dice. Sin esto no pasaba nada visible y el
+       socio tocaba otra vez, con lo que mandaba la solicitud dos veces. */
+    const btn = f.querySelector('button[type="submit"]');
+    const textoBtn = btn ? btn.textContent : '';
+    if(btn){ btn.disabled = true; btn.textContent = 'Enviando...'; }
+    const solId = await crearSolicitud({socio:aNombreDe, cliente, monto, plazo,
+                                        metodoDesembolso:metodo, nota, detalleMetodo});
+    if(btn){ btn.disabled = false; btn.textContent = textoBtn; }
+
+    /* Si fallo, el error ya se mostro: no se repinta la pantalla, asi lo que
+       escribio se queda donde esta y puede volver a intentar. Antes se decia
+       "Solicitud enviada" pasara lo que pasara, y encima se le borraba el
+       formulario: el socio se quedaba creyendo que mando algo que no existe. */
+    if(!solId) return;
+
+    STATE.modal = {type:'solicitud-enviada', solId, comoAdmin, socio: aNombreDe};
     toast(comoAdmin
       ? 'Solicitud creada a nombre de ' + aNombreDe + '. Falta aprobarla.'
       : 'Solicitud enviada. Queda pendiente de aprobación del administrador.');
