@@ -376,7 +376,22 @@ tr:hover td{background:var(--bg-alt);}
 /* modal */
 .overlay{position:fixed; inset:0; background:rgba(10,20,15,0.55); z-index:100; display:flex; align-items:flex-end; justify-content:center; padding:0;}
 @media(min-width:700px){.overlay{align-items:center; padding:20px;}}
-.modal{background:var(--card); width:100%; max-width:520px; border-radius:20px 20px 0 0; padding:20px; max-height:92vh; overflow-y:auto; overscroll-behavior:contain; box-shadow:var(--shadow);}
+/* El ultimo boton del cuadro -casi siempre el de guardar el PDF- quedaba
+   debajo del borde de la pantalla, tapado por la barrita de inicio del
+   telefono. Dos razones y dos arreglos:
+
+   1. 92vh no es el alto que se ve. En el telefono, vh mide la pantalla SIN
+      contar las barras del navegador, asi que el cuadro salia mas alto que
+      el hueco disponible. dvh si mide lo que de verdad se ve; vh queda de
+      respaldo para los navegadores viejos.
+   2. Abajo del todo esta la barrita de inicio. El espacio que ocupa se pide
+      con env(safe-area-inset-bottom) y se suma al relleno, en vez de
+      adivinarlo con un numero fijo que se queda corto o sobra segun el
+      modelo. */
+.modal{background:var(--card); width:100%; max-width:520px; border-radius:20px 20px 0 0;
+  padding:20px; padding-bottom:calc(20px + env(safe-area-inset-bottom, 0px));
+  max-height:88vh; overflow-y:auto; overscroll-behavior:contain; box-shadow:var(--shadow);}
+@supports (max-height:1dvh){ .modal{max-height:88dvh;} }
 @media(min-width:700px){.modal{border-radius:20px;}}
 .modal-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;}
 .close-x{background:none; border:none; font-size:22px; cursor:pointer; color:var(--text-muted); padding:4px 8px;}
@@ -528,7 +543,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '6.7';
+const APP_VERSION = '6.8';
 /* El enlace de recuperacion trae su llave en el hash de la direccion, y
    supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
 const HASH_INICIAL = location.hash || '';
