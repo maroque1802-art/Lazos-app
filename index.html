@@ -144,7 +144,7 @@ select{min-width:150px;}
   position:fixed; top:0; left:0; bottom:0; width:66px; z-index:60;
   background:var(--card); border-right:1px solid var(--border); box-shadow:var(--shadow);
   display:flex; flex-direction:column; align-items:center; gap:4px;
-  padding:10px 0; overflow-y:auto;
+  padding:10px 0; overflow-y:auto; overscroll-behavior:contain;
   transform:translateX(-100%); transition:transform .18s ease;
 }
 .menu-lat.abierto{transform:none;}
@@ -372,7 +372,7 @@ tr:hover td{background:var(--bg-alt);}
 /* modal */
 .overlay{position:fixed; inset:0; background:rgba(10,20,15,0.55); z-index:100; display:flex; align-items:flex-end; justify-content:center; padding:0;}
 @media(min-width:700px){.overlay{align-items:center; padding:20px;}}
-.modal{background:var(--card); width:100%; max-width:520px; border-radius:20px 20px 0 0; padding:20px; max-height:92vh; overflow-y:auto; box-shadow:var(--shadow);}
+.modal{background:var(--card); width:100%; max-width:520px; border-radius:20px 20px 0 0; padding:20px; max-height:92vh; overflow-y:auto; overscroll-behavior:contain; box-shadow:var(--shadow);}
 @media(min-width:700px){.modal{border-radius:20px;}}
 .modal-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;}
 .close-x{background:none; border:none; font-size:22px; cursor:pointer; color:var(--text-muted); padding:4px 8px;}
@@ -524,7 +524,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '6.5';
+const APP_VERSION = '6.6';
 /* El enlace de recuperacion trae su llave en el hash de la direccion, y
    supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
 const HASH_INICIAL = location.hash || '';
@@ -3737,6 +3737,43 @@ function render(){
     + `<main class="container">${renderScreen()}${renderPieLegal()}</main>`
     + (esAdmin ? '' : renderBottomNav()) + renderModal();
   marcarIconoApp();
+  quietarElFondo();
+}
+
+/* Con un modal o el menu lateral abiertos, la pagina de atras se queda
+   quieta. Sin esto habia dos scrolls peleando: uno movia el contenido del
+   modal y el otro, por debajo, movia la pantalla entera; al llegar al final
+   del modal el dedo seguia arrastrando lo de atras.
+
+   No alcanza con overflow:hidden en el body, que en el navegador del iPhone
+   no siempre agarra. Lo que si funciona es fijar el body y acordarse de
+   donde estaba, para devolverlo ahi al cerrar: sin eso, cerrar un modal
+   mandaria la pantalla de vuelta al principio.
+
+   Solo se toca cuando el estado CAMBIA. render() corre a cada rato -el
+   vigilante lo llama cada minuto- y hacerlo siempre le moveria la pantalla a
+   quien estuviera leyendo. */
+let _scrollDelFondo = null;
+function quietarElFondo(){
+  const tapado = !!(STATE.modal || STATE.menu);
+  const b = document.body;
+  if(tapado && _scrollDelFondo === null){
+    _scrollDelFondo = window.scrollY || window.pageYOffset || 0;
+    b.style.position = 'fixed';
+    b.style.top = (-_scrollDelFondo) + 'px';
+    b.style.left = '0';
+    b.style.right = '0';
+    b.style.width = '100%';
+  } else if(!tapado && _scrollDelFondo !== null){
+    const volverA = _scrollDelFondo;
+    _scrollDelFondo = null;
+    b.style.position = '';
+    b.style.top = '';
+    b.style.left = '';
+    b.style.right = '';
+    b.style.width = '';
+    window.scrollTo(0, volverA);
+  }
 }
 
 /* La marca va FUERA de la tarjeta: la tarjeta es el formulario, no el letrero.
