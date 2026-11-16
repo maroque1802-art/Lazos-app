@@ -393,6 +393,18 @@ tr:hover td{background:var(--bg-alt);}
   max-height:88vh; overflow-y:auto; overscroll-behavior:contain; box-shadow:var(--shadow);}
 @supports (max-height:1dvh){ .modal{max-height:88dvh;} }
 @media(min-width:700px){.modal{border-radius:20px;}}
+/* El boton principal se queda pegado abajo del cuadro. Antes, si el resumen
+   era largo, el boton quedaba despues del final y habia que desplazarse por
+   dentro para encontrarlo: parecia que se salia de la pantalla. Asi esta
+   siempre a la vista, mida lo que mida lo de arriba. */
+.modal-pie{
+  position:sticky; z-index:1;
+  bottom:calc(-20px - env(safe-area-inset-bottom, 0px));
+  margin:14px -20px calc(-20px - env(safe-area-inset-bottom, 0px));
+  padding:12px 20px calc(12px + env(safe-area-inset-bottom, 0px));
+  background:var(--card); border-top:1px solid var(--border);
+  display:flex; gap:8px; flex-wrap:wrap;
+}
 .modal-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;}
 .close-x{background:none; border:none; font-size:22px; cursor:pointer; color:var(--text-muted); padding:4px 8px;}
 /* recibo */
@@ -411,7 +423,11 @@ tr:hover td{background:var(--bg-alt);}
    columnas respetan su ancho y el texto largo parte de línea en vez de
    empujar la tabla fuera de la tarjeta. */
 .recibo table{min-width:0; width:100%; table-layout:fixed;}
-.recibo td{border:none; padding:5px 0; font-size:14px; overflow-wrap:anywhere;}
+/* white-space:normal va aqui a proposito: la regla general de las tablas
+   pone nowrap, que en las tablas de datos esta bien, pero en el recibo
+   cortaba el nombre largo del cliente y el "73 dias de atraso" contra el
+   borde de la tarjeta. */
+.recibo td{border:none; padding:5px 0; font-size:14px; overflow-wrap:anywhere; white-space:normal;}
 .recibo td.k{color:var(--text-muted); width:55%; padding-right:8px;}
 .recibo td.v{font-weight:800; text-align:right;}
 .recibo .legal{font-size:11px; color:var(--text-muted); margin-top:12px; text-align:center;}
@@ -543,7 +559,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '6.8';
+const APP_VERSION = '6.9';
 /* El enlace de recuperacion trae su llave en el hash de la direccion, y
    supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
 const HASH_INICIAL = location.hash || '';
@@ -6442,7 +6458,9 @@ function renderCierreModal(ci){
         </table>
         ${ci.observaciones?`<div class="legal" style="text-align:left;"><b>Observaciones:</b> ${ci.observaciones}</div>`:''}
       </div>
-      <button class="btn btn-ghost btn-block" style="margin-top:12px;" data-action="pdf-cierre" data-numero="${ci.numero}" data-reimpresion="0">Guardar PDF del cierre</button>
+      <div class="modal-pie no-print">
+        <button class="btn btn-ghost btn-block" data-action="pdf-cierre" data-numero="${ci.numero}" data-reimpresion="0">Guardar PDF del cierre</button>
+      </div>
     </div>
   </div>`;
 }
@@ -6451,7 +6469,9 @@ function renderMotivoModal(titulo, accion, refId){
     <div class="modal">
       <div class="modal-head"><h3>${titulo}</h3><button class="close-x" data-action="cerrar-modal">✕</button></div>
       <div class="field"><label>Motivo (obligatorio)</label><textarea id="motivo-texto" placeholder="Explica brevemente por qué..."></textarea></div>
-      <button class="btn btn-danger btn-block" data-action="confirmar-motivo" data-accion="${accion}" data-mov="${refId}">Confirmar</button>
+      <div class="modal-pie">
+        <button class="btn btn-danger btn-block" data-action="confirmar-motivo" data-accion="${accion}" data-mov="${refId}">Confirmar</button>
+      </div>
     </div>
   </div>`;
 }
@@ -6479,7 +6499,9 @@ function renderSolicitudEnviadaModal(m){
       <div class="kv"><span class="k">Interés propuesto</span><span class="v">${formatMoney(s.interesPropuesto)}</span></div>
       <div class="kv"><span class="k">Desembolso</span><span class="v">${escapaHtml(s.metodoDesembolso)}</span></div>
       ${lugarEnFila(s.id)}
-      <button class="btn btn-primary btn-block no-print" style="margin-top:12px;" data-action="cerrar-modal">Entendido</button>
+      <div class="modal-pie no-print">
+        <button class="btn btn-primary btn-block" data-action="cerrar-modal">Entendido</button>
+      </div>
     </div>
   </div>`;
 }
@@ -6502,7 +6524,7 @@ function renderDesembolsoModal(prestamoId){
       ${detalle ? `<div class="kv"><span class="k"></span><span class="v muted" style="font-weight:400;">${escapaHtml(detalle)}</span></div>` : ''}
       <div class="kv"><span class="k">Total a pagar</span><span class="v">${formatMoney(totalAPagar(p))}</span></div>
       <div class="kv"><span class="k">Vence el</span><span class="v">${p.vencimiento}</span></div>
-      <div style="display:flex; gap:8px; margin-top:12px;" class="no-print">
+      <div class="modal-pie no-print">
         <button class="btn btn-primary btn-block" data-action="pdf-desembolso" data-prestamo="${p.id}" data-reimpresion="0">Guardar el comprobante (PDF)</button>
       </div>
     </div>
@@ -6529,7 +6551,7 @@ function renderReciboModal(r){
         </table>
       </div>
       </div>
-      <div style="display:flex; gap:8px; margin-top:12px;" class="no-print">
+      <div class="modal-pie no-print">
         <button class="btn btn-primary btn-block" data-action="pdf-recibo" data-numero="${r.numero}" data-reimpresion="0">Imprimir / Guardar PDF</button>
       </div>
     </div>
