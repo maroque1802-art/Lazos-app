@@ -83,7 +83,11 @@
   }
 }
 *{box-sizing:border-box;}
-html,body{margin:0;padding:0;}
+/* El telefono deja arrastrar la pagina mas alla de donde termina y rebota,
+   dejando ver una franja vacia arriba. En una pagina web se perdona; en una
+   aplicacion metida en la pantalla de inicio parece que se despego. Con esto
+   la pagina se detiene donde se acaba. */
+html,body{margin:0; padding:0; overscroll-behavior-y:none;}
 body{
   background:var(--bg); color:var(--text);
   font-family:'Nunito Sans', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
@@ -524,7 +528,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '6.6';
+const APP_VERSION = '6.7';
 /* El enlace de recuperacion trae su llave en el hash de la direccion, y
    supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
 const HASH_INICIAL = location.hash || '';
