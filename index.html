@@ -559,7 +559,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '6.9';
+const APP_VERSION = '7.0';
 /* El enlace de recuperacion trae su llave en el hash de la direccion, y
    supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
 const HASH_INICIAL = location.hash || '';
@@ -2599,6 +2599,19 @@ async function enviarMensajeGeneral({titulo, cuerpo, socioId}){
 /* El corte se guarda con las cifras adentro. Nunca se recalcula al abrirlo:
    un estado de cuenta es una fotografía, y si cambia deja de servir. */
 async function enviarCorteMensual(anio, mes, nota){
+  /* Un mes se cierra una sola vez. El candado va aqui, en el ultimo paso,
+     y no solo en quien decide si toca cerrar: el robot pregunto con la lista
+     de mensajes todavia vacia -se habia adelantado a que terminara de
+     cargar- creyo que octubre estaba sin cerrar y lo mando de nuevo cada
+     dia. Se relee la lista antes de decidir, para no responder con lo que
+     habia en memoria hace rato. */
+  try{ await cargarMensajes(); }catch(e){ /* sin la 0010 no hay que revisar */ }
+  if(corteYaEnviado(anio, mes)){
+    const ya = MENSAJES.find(m => m.tipo === 'corte_mensual'
+                               && m.periodoFin === formatDMY(ultimoDiaDelMes(anio, mes)));
+    toast(`${NOMBRE_MES[mes-1]} ${anio} ya se cerró${ya && ya.numero ? ' con el ' + ya.numero : ''}. No se manda otra vez.`);
+    return;
+  }
   const corte = calcularCorteMensual(anio, mes);
   if(!corte.cuadre.cuadra){
     toast('El corte no cuadra por ' + formatMoney(Math.abs(corte.cuadre.diferencia))
