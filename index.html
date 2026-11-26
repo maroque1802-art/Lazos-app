@@ -559,7 +559,7 @@ const CONFIG = {
   saldoInicialEfectivo: 0
 };
 
-const APP_VERSION = '7.0';
+const APP_VERSION = '7.1';
 /* El enlace de recuperacion trae su llave en el hash de la direccion, y
    supabase-js lo consume y lo borra apenas arranca. Hay que copiarlo antes. */
 const HASH_INICIAL = location.hash || '';
@@ -2503,6 +2503,28 @@ function descargarBlobLocal(blob, nombre){
   document.body.removeChild(a);
   setTimeout(()=>URL.revokeObjectURL(url), 30000);
 }
+/* ¿Conviene pasarle el archivo a la hoja de compartir del telefono?
+
+   Al bajar el PDF con un enlace, el telefono recibe una direccion blob: y no
+   sabe que hay detras: la trata como una pagina web y pregunta "Enviar como:
+   Automatico / Archivo PDF", con Automatico puesto. Habia que entrar a
+   Opciones y marcar PDF cada vez.
+
+   Pasandole un archivo de verdad, con su nombre y su tipo, no hay nada que
+   convertir ni que preguntar: va como PDF y se acabo.
+
+   Solo en pantallas de tocar. En una computadora, bajar el archivo a la
+   carpeta de descargas es mejor que abrir el menu de compartir del sistema. */
+function compartirComoArchivo(blob, nombre){
+  try{
+    if(typeof File !== 'function' || !navigator.canShare) return null;
+    const finoElPuntero = window.matchMedia && window.matchMedia('(pointer: fine)').matches;
+    if(finoElPuntero) return null;
+    const archivo = new File([blob], nombre, {type:'application/pdf'});
+    return navigator.canShare({files:[archivo]}) ? archivo : null;
+  }catch(e){ return null; }
+}
+
 async function entregarPdf(construir, nombre, etiqueta){
   let blob;
   try{
@@ -2511,6 +2533,22 @@ async function entregarPdf(construir, nombre, etiqueta){
     toast('No se pudo generar el PDF: ' + e.message);
     return;
   }
+
+  /* Esto va antes que cualquier espera: el telefono solo deja abrir la hoja
+     de compartir mientras el toque de la persona sigue "vivo", y una espera
+     de por medio lo da por terminado. */
+  const archivo = compartirComoArchivo(blob, nombre);
+  if(archivo){
+    try{
+      await navigator.share({files:[archivo], title: nombre});
+      return;
+    }catch(e){
+      // Cerrar la hoja de compartir no es un error: no hay nada que avisar.
+      if(e && (e.name === 'AbortError' || e.name === 'NotAllowedError')) return;
+      // Cualquier otra cosa cae a la descarga de siempre.
+    }
+  }
+
   toast('Generando ' + etiqueta + '...');
 
   let downloads = null;
